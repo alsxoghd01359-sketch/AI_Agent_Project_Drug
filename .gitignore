@@ -1,0 +1,18 @@
+# 민감정보
+.env
+
+# 대용량 데이터 (fetch_drug_data.py로 재생성 가능)
+data/
+chroma_db/
+
+# 파이썬
+__pycache__/
+*.pyc
+
+# 로그/임시 파일
+*.log
+*_log.txt
+out.txt
+
+# 에디터
+.vscode/
