@@ -65,7 +65,8 @@ def search_product(query: str, top_k: int = 5):
     ]
 
 
-def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold: float = 0.6):
+def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold: float = 0.6,
+                                    min_score: float = 75.0, min_candidates: int = 2):
     """제품명 검색 + 신뢰도 판정.
 
     오타가 2글자 이상이면 문자열 유사도 점수만으로는 완전히 다른 약과 구분이
@@ -73,6 +74,13 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     그래서 점수 대신 "상위 후보들이 같은 성분을 공유하는가"로 신뢰도를 판단한다.
     같은 제품군(예: 타이레놀 계열)은 브랜드명이 갈려도 성분이 겹치지만,
     완전히 다른 약이 우연히 비슷한 점수로 섞이면 성분이 겹치지 않기 때문이다.
+
+    다만 성분 겹침만으로는 두 가지 거짓양성이 생기는 걸 실측으로 확인함.
+    1) 후보가 1개뿐이면 자기 자신과만 비교해 겹침이 무조건 100%가 됨(예: "토아래눌")
+    2) 오타 난 문자열이 우연히 전혀 다른 약 그룹과 더 많이 겹쳐서, 그 그룹 안에서는
+       서로 성분이 일관되게 나오는 경우(예: "태이레논" -> 게피티니브 계열 항암제)
+    두 경우 모두 최고 점수가 75 미만으로 낮았다는 공통점이 있어, 점수 하한과 최소
+    후보 수 조건을 추가로 걸어서 걸러낸다.
 
     반환: {"candidates": [...], "confident": bool, "overlap_ratio": float}
     confident=False면 특정 제품으로 단정하지 말고 재확인을 요청해야 한다.
@@ -88,9 +96,15 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     overlap_count = sum(1 for s in ingr_sets if s & top_ingr)
     overlap_ratio = overlap_count / len(candidates)
 
+    confident = (
+        candidates[0]["score"] >= min_score
+        and overlap_ratio >= overlap_threshold
+        and len(candidates) >= min_candidates
+    )
+
     return {
         "candidates": candidates,
-        "confident": overlap_ratio >= overlap_threshold,
+        "confident": confident,
         "overlap_ratio": round(overlap_ratio, 2),
     }
 
