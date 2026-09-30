@@ -32,7 +32,13 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    단정하지 마세요. 도구 결과에 clarification_question 필드가 있으면, 그
    문장을 직접 새로 만들지 말고 반드시 그 문장을 그대로(고치거나 요약하지 말고)
    답변에 포함해서 되물으세요. 성분 목록이나 제품 목록을 따로 나열하지 마세요.
-6. 답변 마지막에 데이터 출처를 명시하세요(예: "DUR 데이터 기준", "의약품 제품허가정보 기준").
+6. check_drug_interactions 결과에 unresolved_queries가 있으면(제품명이 특정
+   안 된 약이 포함된 경우), 그 약이 "어떤 성분이면 괜찮고 어떤 성분이면
+   안 되는지" 같은 조건부 추정이나 부분적 비교를 스스로 만들어내지 마세요.
+   병용 여부 판단은 성분이 확정된 뒤에만 가능하므로, 해당 약의
+   clarification_question을 그대로 전달해 제품부터 특정해달라고 요청하고,
+   나머지 확정된 약들 사이의 결과만 사실대로 전달하세요.
+7. 답변 마지막에 데이터 출처를 명시하세요(예: "DUR 데이터 기준", "의약품 제품허가정보 기준").
 """
 
 TOOLS = [
@@ -189,6 +195,7 @@ def chat(user_message: str, max_tool_rounds: int = 5) -> str:
             model=CHAT_MODEL,
             messages=messages,
             tools=TOOLS,
+            temperature=0,
         )
         msg = response.choices[0].message
 
