@@ -65,6 +65,65 @@ def search_product(query: str, top_k: int = 5):
     ]
 
 
+def _group_candidates_by_ingredient(candidates, ingr_sets):
+    """후보들을 정확히 같은 성분 조합이 아니라, 성분이 겹치면 같은 "계열"로 묶는다.
+
+    실측으로 확인: "게보린"은 제품마다 부성분(카페인, 비타민 등)이 조금씩 달라서
+    전체 성분 조합이 똑같은 제품이 거의 없다. 그래서 완전히 같은 성분 조합으로
+    묶으면 제품 5개가 그룹 5개로 쪼개져서 사용자에게 의미 없이 세세하게 되묻게 된다.
+    실제로 사용자가 구분하고 싶어하는 건 "주성분이 같은가"이므로, 성분 하나라도
+    겹치면 연결(union-find)해서 묶는다 (아세트아미노펜 계열 vs 이부프로펜 계열처럼).
+    """
+    n = len(candidates)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    empty_indices = [i for i in range(n) if not ingr_sets[i]]
+    for i in empty_indices[1:]:
+        union(empty_indices[0], i)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if ingr_sets[i] & ingr_sets[j]:
+                union(i, j)
+
+    component_indices: dict[int, list[int]] = {}
+    for i in range(n):
+        component_indices.setdefault(find(i), []).append(i)
+
+    groups = []
+    for idxs in component_indices.values():
+        sets_in_group = [ingr_sets[i] for i in idxs]
+        if all(sets_in_group):
+            common = set.intersection(*sets_in_group)
+        else:
+            common = set()
+        if not common:
+            counter: dict[str, int] = {}
+            for s in sets_in_group:
+                for ingr in s:
+                    counter[ingr] = counter.get(ingr, 0) + 1
+            common = {max(counter, key=counter.get)} if counter else set()
+        representative = sorted(common)[0] if common else "성분 정보 없음"
+        all_ingredients = sorted(set().union(*sets_in_group)) if sets_in_group else []
+        rest = [x for x in all_ingredients if x != representative]
+        groups.append({
+            "ingredients": [representative] + rest,
+            "products": [candidates[i]["item_name"] for i in idxs],
+        })
+    return groups
+
+
 def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold: float = 0.6,
                                     min_score: float = 75.0, min_candidates: int = 2):
     """제품명 검색 + 신뢰도 판정.
@@ -89,7 +148,7 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     candidates = search_product(query, top_k=top_k)
 
     if not candidates:
-        return {"candidates": [], "confident": False, "overlap_ratio": 0.0}
+        return {"candidates": [], "confident": False, "overlap_ratio": 0.0, "candidate_groups": []}
 
     ingr_sets = [set(_ingredients_by_seq.get(c["item_seq"], [])) for c in candidates]
     top_ingr = ingr_sets[0]
@@ -102,11 +161,26 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
         and len(candidates) >= min_candidates
     )
 
-    return {
+    result = {
         "candidates": candidates,
         "confident": confident,
         "overlap_ratio": round(overlap_ratio, 2),
     }
+
+    if not confident:
+        # 후보들이 왜 하나로 안 좁혀지는지 LLM이 알 수 있게, 성분 기준으로 묶어서 보여준다.
+        # (예: "게보린"은 이름은 같아도 아세트아미노펜 계열/이부프로펜 계열로 실제 성분이 갈림)
+        candidate_groups = _group_candidates_by_ingredient(candidates, ingr_sets)
+        result["candidate_groups"] = candidate_groups
+
+        # "그룹당 대표 제품 1개씩만" 되묻는 문장을 코드에서 직접 만든다.
+        # LLM한테 이 규칙을 글로만 지시하면 그룹당 여러 제품을 다 물어보는 등
+        # 지시를 안정적으로 안 지키는 걸 확인해서, 문장 자체를 코드로 확정한다.
+        questions = [f"{g['ingredients'][0]} 계열의 {g['products'][0]}을 말씀하시는 건가요?"
+                     for g in candidate_groups]
+        result["clarification_question"] = " ".join(questions)
+
+    return result
 
 
 def get_product_detail(item_seq: str):
@@ -159,7 +233,9 @@ def check_multiple_drugs(names: list[str]):
             # 신뢰 불가 -> 엉뚱한 약으로 조용히 진행하지 않고 미해결로 남긴다.
             resolved.append({"query": name, "item_seq": None, "item_name": None,
                               "candidates": cands, "ingredients": [],
-                              "ambiguous": bool(cands)})
+                              "ambiguous": bool(cands),
+                              "candidate_groups": result.get("candidate_groups", []),
+                              "clarification_question": result.get("clarification_question")})
             continue
         best = cands[0]
         resolved.append({
