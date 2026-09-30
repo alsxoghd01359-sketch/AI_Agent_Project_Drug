@@ -38,7 +38,20 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    병용 여부 판단은 성분이 확정된 뒤에만 가능하므로, 해당 약의
    clarification_question을 그대로 전달해 제품부터 특정해달라고 요청하고,
    나머지 확정된 약들 사이의 결과만 사실대로 전달하세요.
-7. 답변 마지막에 데이터 출처를 명시하세요(예: "DUR 데이터 기준", "의약품 제품허가정보 기준").
+7. "먹어도 되나요/복용해도 되나요/안전한가요/괜찮나요" 같은 질문을 받으면
+   도구를 호출하기 전에 먼저 이 순서로 판단하세요.
+   (1) 질문 안에 다른 약 이름이 이미 나와 있다 -> 되묻지 말고 즉시
+       check_drug_interactions를 호출하세요.
+   (2) 질문 안에 음주/공복/운전 등 구체적인 생활 상황이 이미 나와 있다 ->
+       되묻지 말고 즉시 ask_lifestyle_question을 호출하세요.
+   (3) 위 두 경우에 해당하지 않고 약 이름 하나만 있다 -> 이때만 도구를
+       호출하지 말고 먼저 "현재 다른 약을 복용하고 계신가요?"라고 되물으세요.
+       사용자가 복용 중인 다른 약을 알려주면 check_drug_interactions로 두
+       약을 함께 확인하고, 없다고 답하면 get_drug_info로 성분/효능/주의사항을
+       전달하세요.
+   (1)과 (2)에 해당하는 질문에는 절대로 "현재 다른 약을 복용하고 계신가요?"
+   라고 되묻지 마세요 — 질문에 이미 답이 나와 있습니다.
+8. 답변 마지막에 데이터 출처를 명시하세요(예: "DUR 데이터 기준", "의약품 제품허가정보 기준").
 """
 
 TOOLS = [
@@ -180,38 +193,52 @@ TOOL_DISPATCH = {
 }
 
 
+class Conversation:
+    """대화 기록을 유지하는 멀티턴 세션.
+
+    "약 먹어도 되나요?"처럼 되묻기(현재 다른 약 복용 중인지)가 필요한 질문은
+    한 번의 호출로 끝나지 않으므로, 이전 턴의 messages를 계속 이어붙여야
+    LLM이 되물은 질문에 대한 사용자의 답을 원래 맥락과 연결해서 이해할 수 있다.
+    """
+
+    def __init__(self):
+        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    def send(self, user_message: str, max_tool_rounds: int = 5) -> str:
+        emergency = detect_emergency(user_message)
+        if emergency:
+            return emergency["message"]
+
+        self.messages.append({"role": "user", "content": user_message})
+
+        for _ in range(max_tool_rounds):
+            response = _client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=self.messages,
+                tools=TOOLS,
+                temperature=0,
+            )
+            msg = response.choices[0].message
+
+            if not msg.tool_calls:
+                self.messages.append({"role": "assistant", "content": msg.content})
+                return msg.content
+
+            self.messages.append(msg)
+            for tool_call in msg.tool_calls:
+                fn_name = tool_call.function.name
+                fn_args = json.loads(tool_call.function.arguments)
+                fn = TOOL_DISPATCH.get(fn_name)
+                result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
+
+        return "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다."
+
+
 def chat(user_message: str, max_tool_rounds: int = 5) -> str:
-    emergency = detect_emergency(user_message)
-    if emergency:
-        return emergency["message"]
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
-
-    for _ in range(max_tool_rounds):
-        response = _client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            tools=TOOLS,
-            temperature=0,
-        )
-        msg = response.choices[0].message
-
-        if not msg.tool_calls:
-            return msg.content
-
-        messages.append(msg)
-        for tool_call in msg.tool_calls:
-            fn_name = tool_call.function.name
-            fn_args = json.loads(tool_call.function.arguments)
-            fn = TOOL_DISPATCH.get(fn_name)
-            result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result, ensure_ascii=False, default=str),
-            })
-
-    return "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다."
+    """대화 기록이 필요 없는 단발성 질문용 편의 함수. 멀티턴 대화는 Conversation을 쓴다."""
+    return Conversation().send(user_message, max_tool_rounds=max_tool_rounds)
