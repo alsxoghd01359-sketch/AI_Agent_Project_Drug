@@ -141,6 +141,15 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     두 경우 모두 최고 점수가 75 미만으로 낮았다는 공통점이 있어, 점수 하한과 최소
     후보 수 조건을 추가로 걸어서 걸러낸다.
 
+    성분 겹침이 높아도 또 다른 문제가 있다는 걸 실측으로 확인함: "타이레놀"처럼
+    브랜드명만 입력하면 성인용 정제/어린이용 산제·현탁액/8시간 서방정/감기 복합제
+    (타이레놀콜드-에스정 등 아세트아미노펜 외 다른 성분이 추가된 제품)까지 전부
+    최고 점수로 동점 처리된다. 이런 제품들은 같은 "계열"이라도 실제로는 서로
+    다른 구체적 제품이고 용법·용량·주의사항이 다르므로, 점수가 동점인 후보가
+    여럿이면(=쿼리만으로는 어떤 구체적 제품인지 구분이 안 됨) 성분이 같아도
+    confident로 처리하지 않는다. "타이레놀정500mg"처럼 구체적으로 물으면
+    최고 점수가 유일해져서 이 조건에 걸리지 않는다.
+
     반환: {"candidates": [...], "confident": bool, "overlap_ratio": float}
     confident=False면 특정 제품으로 단정하지 말고 재확인을 요청해야 한다.
     """
@@ -155,10 +164,15 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     overlap_count = sum(1 for s in ingr_sets if s & top_ingr)
     overlap_ratio = overlap_count / len(candidates)
 
+    top_score = candidates[0]["score"]
+    tied_names = {c["item_name"] for c in candidates if c["score"] == top_score}
+    score_ambiguous = len(tied_names) >= 2
+
     confident = (
         candidates[0]["score"] >= min_score
         and overlap_ratio >= overlap_threshold
         and len(candidates) >= min_candidates
+        and not score_ambiguous
     )
 
     result = {
@@ -173,11 +187,20 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
         candidate_groups = _group_candidates_by_ingredient(candidates, ingr_sets)
         result["candidate_groups"] = candidate_groups
 
-        # "그룹당 대표 제품 1개씩만" 되묻는 문장을 코드에서 직접 만든다.
-        # LLM한테 이 규칙을 글로만 지시하면 그룹당 여러 제품을 다 물어보는 등
-        # 지시를 안정적으로 안 지키는 걸 확인해서, 문장 자체를 코드로 확정한다.
-        questions = [f"{g['ingredients'][0]} 계열의 {g['products'][0]}을 말씀하시는 건가요?"
-                     for g in candidate_groups]
+        # 그룹 안에 제품이 여러 개면(예: 타이레놀 계열 안에 정/산제/현탁액/서방정/감기
+        # 복합제가 다 섞여 있음) 대표 제품 하나만 물어보면 나머지 제품이 묻혀버리므로
+        # 전부 나열한다. LLM한테 이 규칙을 글로만 지시하면 안정적으로 안 지키는 걸
+        # 확인해서, 문장 자체를 코드에서 확정한다.
+        questions = []
+        for g in candidate_groups:
+            if len(g["products"]) == 1:
+                questions.append(f"{g['ingredients'][0]} 계열의 {g['products'][0]}을 말씀하시는 건가요?")
+            else:
+                product_list = ", ".join(g["products"])
+                questions.append(
+                    f"{g['ingredients'][0]} 계열에는 {product_list} 등 여러 제품이 있습니다. "
+                    "그중 어떤 제품을 말씀하시는 건가요?"
+                )
         result["clarification_question"] = " ".join(questions)
 
     return result
