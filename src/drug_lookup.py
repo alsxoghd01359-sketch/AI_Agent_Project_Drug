@@ -97,40 +97,68 @@ def get_product_detail(item_seq: str):
     }
 
 
-def check_interaction(name_a: str, name_b: str):
-    """두 제품명으로 병용 확인. 제품명이 애매하면 candidates를 함께 반환한다."""
+def check_multiple_drugs(names: list[str]):
+    """2개 이상의 제품명을 받아 전체 조합에 대해 확인한다.
+
+    - 성분 중복: 어떤 성분이든 2개 이상의 약에 공통으로 들어있으면 과다복용 위험으로 표시
+      (병용금기와는 다른 문제 — 같은 성분을 이중으로 섭취하는 것 자체가 위험)
+    - DUR 병용금기: 모든 약 쌍(pair) 조합에 대해 확인
+    제품명이 애매하면 candidates를 함께 반환해서 호출측에서 되물을 수 있게 한다.
+    """
     _ensure_loaded()
 
-    cands_a = search_product(name_a, top_k=3)
-    cands_b = search_product(name_b, top_k=3)
+    resolved = []
+    for name in names:
+        cands = search_product(name, top_k=3)
+        if not cands:
+            resolved.append({"query": name, "item_seq": None, "item_name": None,
+                              "candidates": [], "ingredients": []})
+            continue
+        best = cands[0]
+        resolved.append({
+            "query": name,
+            "item_seq": best["item_seq"],
+            "item_name": best["item_name"],
+            "candidates": cands,
+            "ingredients": _ingredients_by_seq.get(best["item_seq"], []),
+        })
 
-    if not cands_a or not cands_b:
-        return {"error": "제품을 찾지 못했습니다.", "candidates_a": cands_a, "candidates_b": cands_b}
+    unresolved = [r["query"] for r in resolved if r["item_seq"] is None]
 
-    # 가장 점수 높은 후보를 채택하되, 후보 전체도 같이 반환(호출측에서 애매하면 되물을 수 있게)
-    best_a, best_b = cands_a[0], cands_b[0]
+    # 1) 성분 중복 (과다복용 위험) — 약 2개짜리 조합만이 아니라 전체 목록 기준
+    ingredient_to_drugs: dict[str, set] = {}
+    for r in resolved:
+        for ingr in r["ingredients"]:
+            ingredient_to_drugs.setdefault(ingr, set()).add(r["item_name"])
 
-    ingr_a = _ingredients_by_seq.get(best_a["item_seq"], [])
-    ingr_b = _ingredients_by_seq.get(best_b["item_seq"], [])
+    duplicate_ingredients = [
+        {"ingredient": ingr, "drugs": sorted(drugs)}
+        for ingr, drugs in ingredient_to_drugs.items()
+        if len(drugs) >= 2
+    ]
 
-    # 1) 동일 성분 중복 (과다복용 위험)
-    duplicate = sorted(set(ingr_a) & set(ingr_b))
-
-    # 2) DUR 병용금기
+    # 2) DUR 병용금기 — 모든 쌍 조합
     seen_pairs = set()
     taboo_hits = []
-    for ia in ingr_a:
-        for ib in ingr_b:
-            key = tuple(sorted([ia, ib]))
-            reason = _taboo_pairs.get(key)
-            if reason and key not in seen_pairs:
-                seen_pairs.add(key)
-                taboo_hits.append({"ingredient_a": ia, "ingredient_b": ib, "reason": reason})
+    for i in range(len(resolved)):
+        for j in range(i + 1, len(resolved)):
+            a, b = resolved[i], resolved[j]
+            for ia in a["ingredients"]:
+                for ib in b["ingredients"]:
+                    key = tuple(sorted([ia, ib]))
+                    reason = _taboo_pairs.get(key)
+                    if reason and key not in seen_pairs:
+                        seen_pairs.add(key)
+                        taboo_hits.append({
+                            "drug_a": a["item_name"], "ingredient_a": ia,
+                            "drug_b": b["item_name"], "ingredient_b": ib,
+                            "reason": reason,
+                        })
 
     return {
-        "matched_a": {"item_seq": best_a["item_seq"], "item_name": best_a["item_name"], "candidates": cands_a},
-        "matched_b": {"item_seq": best_b["item_seq"], "item_name": best_b["item_name"], "candidates": cands_b},
-        "duplicate_ingredients": duplicate,
+        "resolved_drugs": resolved,
+        "unresolved_queries": unresolved,
+        "duplicate_ingredients": duplicate_ingredients,
         "dur_taboo_matches": taboo_hits,
-        "has_issue": bool(duplicate or taboo_hits),
+        "has_issue": bool(duplicate_ingredients or taboo_hits),
     }
