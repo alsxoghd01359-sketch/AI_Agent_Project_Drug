@@ -6,6 +6,8 @@
   동일성분 중복 여부를 확인해서 사실 그대로 반환한다. "안전하다"는 판단은 하지 않는다.
 """
 import json
+import pickle
+import re
 from pathlib import Path
 
 from name_match import find_candidates
@@ -13,12 +15,15 @@ from text_extract import doc_xml_to_text
 from symptom_search import _normalize_ingredient
 
 DATA_DIR = Path("data")
+_CACHE_DIR = DATA_DIR / "_cache"
 
-_detail_by_seq = None
+_detail_offsets = None  # item_seq -> drug_prdt_prmsn_detail.jsonl 안의 바이트 오프셋
 _easy_by_seq = None
 _list_by_seq = None
 _ingredients_by_seq = None  # item_seq -> [MTRAL_NM, ...]
 _taboo_pairs = None  # {(성분A, 성분B) 정렬됨: PROHBT_CONTENT}
+
+_ITEM_SEQ_RE = re.compile(rb'"ITEM_SEQ"\s*:\s*"([^"]+)"')
 
 
 def _read_jsonl(name: str):
@@ -27,14 +32,81 @@ def _read_jsonl(name: str):
             yield json.loads(line)
 
 
+def _build_detail_offsets():
+    """drug_prdt_prmsn_detail.jsonl은 항목당 EE/UD/NB_DOC_DATA(XML 원문)가 들어있어서
+    평균 수십 KB, 전체 2GB가 넘는다. 실측으로 확인: 이걸 통째로 dict에 올리면 14초
+    넘게 걸리는데, 실제로는 세션당 한두 건만 조회한다. 그래서 전체를 json.loads로
+    파싱하지 않고, 각 줄 맨 앞의 ITEM_SEQ만 정규식으로 빠르게 뽑아서 파일 바이트
+    오프셋만 인덱싱해두고, 조회할 때 그 줄만 seek해서 읽는다.
+    """
+    global _detail_offsets
+    cache_path = _CACHE_DIR / "detail_offsets.pkl"
+    if cache_path.exists():
+        with cache_path.open("rb") as f:
+            _detail_offsets = pickle.load(f)
+        return
+
+    offsets = {}
+    path = DATA_DIR / "drug_prdt_prmsn_detail.jsonl"
+    with path.open("rb") as f:
+        offset = f.tell()
+        for raw in f:
+            m = _ITEM_SEQ_RE.search(raw[:200])
+            if m:
+                offsets[m.group(1).decode("utf-8")] = offset
+            offset = f.tell()
+
+    _detail_offsets = offsets
+    _CACHE_DIR.mkdir(exist_ok=True)
+    with cache_path.open("wb") as f:
+        pickle.dump(offsets, f)
+
+
+def _get_detail(item_seq: str) -> dict:
+    if _detail_offsets is None:
+        _build_detail_offsets()
+    offset = _detail_offsets.get(item_seq)
+    if offset is None:
+        return {}
+    path = DATA_DIR / "drug_prdt_prmsn_detail.jsonl"
+    with path.open("rb") as f:
+        f.seek(offset)
+        line = f.readline()
+    return json.loads(line)
+
+
+def _load_taboo_pairs():
+    """dur_usjnt_taboo.jsonl은 79만 줄(1.3GB)이지만 실제 고유 병용금기 쌍은
+    870개뿐이다(중복 성분쌍이 대부분). 매번 1.3GB를 다 읽는 대신, 뽑아낸 결과를
+    캐시 파일에 저장해두고 다음 실행부터는 그걸 바로 불러온다.
+    """
+    global _taboo_pairs
+    cache_path = _CACHE_DIR / "taboo_pairs.pkl"
+    if cache_path.exists():
+        with cache_path.open("rb") as f:
+            _taboo_pairs = pickle.load(f)
+        return
+
+    pairs = {}
+    for r in _read_jsonl("dur_usjnt_taboo"):
+        a, b = r.get("INGR_KOR_NAME"), r.get("MIXTURE_INGR_KOR_NAME")
+        if a and b:
+            pairs[tuple(sorted([a, b]))] = r.get("PROHBT_CONTENT")
+
+    _taboo_pairs = pairs
+    _CACHE_DIR.mkdir(exist_ok=True)
+    with cache_path.open("wb") as f:
+        pickle.dump(pairs, f)
+
+
 def _ensure_loaded():
-    global _detail_by_seq, _easy_by_seq, _list_by_seq, _ingredients_by_seq, _taboo_pairs
+    global _easy_by_seq, _list_by_seq, _ingredients_by_seq
 
     if _list_by_seq is None:
         _list_by_seq = {r["ITEM_SEQ"]: r for r in _read_jsonl("drug_prdt_prmsn_list")}
 
-    if _detail_by_seq is None:
-        _detail_by_seq = {r["ITEM_SEQ"]: r for r in _read_jsonl("drug_prdt_prmsn_detail")}
+    if _detail_offsets is None:
+        _build_detail_offsets()
 
     if _easy_by_seq is None:
         _easy_by_seq = {r["itemSeq"]: r for r in _read_jsonl("easy_drug")}
@@ -50,11 +122,7 @@ def _ensure_loaded():
                 names.append(name)
 
     if _taboo_pairs is None:
-        _taboo_pairs = {}
-        for r in _read_jsonl("dur_usjnt_taboo"):
-            a, b = r.get("INGR_KOR_NAME"), r.get("MIXTURE_INGR_KOR_NAME")
-            if a and b:
-                _taboo_pairs[tuple(sorted([a, b]))] = r.get("PROHBT_CONTENT")
+        _load_taboo_pairs()
 
 
 def search_product(query: str, top_k: int = 5):
@@ -214,7 +282,7 @@ def get_product_detail(item_seq: str):
     if not base:
         return None
 
-    detail = _detail_by_seq.get(item_seq, {})
+    detail = _get_detail(item_seq)
     easy = _easy_by_seq.get(item_seq, {})
 
     efcy = easy.get("efcyQesitm") or doc_xml_to_text(detail.get("EE_DOC_DATA"))
