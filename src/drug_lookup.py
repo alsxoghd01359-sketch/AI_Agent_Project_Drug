@@ -65,6 +65,36 @@ def search_product(query: str, top_k: int = 5):
     ]
 
 
+def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold: float = 0.6):
+    """제품명 검색 + 신뢰도 판정.
+
+    오타가 2글자 이상이면 문자열 유사도 점수만으로는 완전히 다른 약과 구분이
+    안 되는 걸 실측으로 확인함(예: "타이래논" -> 무관한 "타이록신캡슐"이 상위권).
+    그래서 점수 대신 "상위 후보들이 같은 성분을 공유하는가"로 신뢰도를 판단한다.
+    같은 제품군(예: 타이레놀 계열)은 브랜드명이 갈려도 성분이 겹치지만,
+    완전히 다른 약이 우연히 비슷한 점수로 섞이면 성분이 겹치지 않기 때문이다.
+
+    반환: {"candidates": [...], "confident": bool, "overlap_ratio": float}
+    confident=False면 특정 제품으로 단정하지 말고 재확인을 요청해야 한다.
+    """
+    _ensure_loaded()
+    candidates = search_product(query, top_k=top_k)
+
+    if not candidates:
+        return {"candidates": [], "confident": False, "overlap_ratio": 0.0}
+
+    ingr_sets = [set(_ingredients_by_seq.get(c["item_seq"], [])) for c in candidates]
+    top_ingr = ingr_sets[0]
+    overlap_count = sum(1 for s in ingr_sets if s & top_ingr)
+    overlap_ratio = overlap_count / len(candidates)
+
+    return {
+        "candidates": candidates,
+        "confident": overlap_ratio >= overlap_threshold,
+        "overlap_ratio": round(overlap_ratio, 2),
+    }
+
+
 def get_product_detail(item_seq: str):
     """의약품 item_seq로 상세정보(효능효과/용법용량/주의사항/상호작용/이상반응) 조회."""
     _ensure_loaded()
@@ -109,10 +139,13 @@ def check_multiple_drugs(names: list[str]):
 
     resolved = []
     for name in names:
-        cands = search_product(name, top_k=3)
-        if not cands:
+        result = search_product_with_confidence(name, top_k=5)
+        cands = result["candidates"]
+        if not cands or not result["confident"]:
+            # 신뢰 불가 -> 엉뚱한 약으로 조용히 진행하지 않고 미해결로 남긴다.
             resolved.append({"query": name, "item_seq": None, "item_name": None,
-                              "candidates": [], "ingredients": []})
+                              "candidates": cands, "ingredients": [],
+                              "ambiguous": bool(cands)})
             continue
         best = cands[0]
         resolved.append({
@@ -121,6 +154,7 @@ def check_multiple_drugs(names: list[str]):
             "item_name": best["item_name"],
             "candidates": cands,
             "ingredients": _ingredients_by_seq.get(best["item_seq"], []),
+            "ambiguous": False,
         })
 
     unresolved = [r["query"] for r in resolved if r["item_seq"] is None]
