@@ -72,7 +72,10 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
        호출하세요.
    (1)과 (2)에 해당하는 질문에는 절대로 "현재 다른 약을 복용하고 계신가요?"
    라고 되묻지 마세요 — 질문에 이미 답이 나와 있습니다.
-8. 답변 마지막에 데이터 출처를 명시하세요(예: "DUR 데이터 기준", "의약품 제품허가정보 기준").
+8. 도구 결과에 data_source 필드가 있으면, 답변 마지막에 "데이터 출처: {그 값}"을
+   그대로 쓰세요. 어떤 출처를 쓸지 직접 판단하거나 "DUR" 같은 다른 용어로
+   바꾸지 말고, data_source 값을 그대로 옮기세요. 실제 데이터를 전달하지 않고
+   되묻기만 하는 답변(3번 예외 참고)에는 이 출처 표기 자체를 넣지 마세요.
 """
 
 TOOLS = [
@@ -81,7 +84,8 @@ TOOLS = [
         "function": {
             "name": "check_drug_interactions",
             "description": "2개 이상의 의약품을 함께 복용해도 되는지 확인한다. "
-                            "DUR 병용금기 등록 여부와 동일 성분 중복(과다복용 위험) 여부를 반환한다.",
+                            "의약품안전사용서비스 병용금기 등록 여부와 동일 성분 중복"
+                            "(과다복용 위험) 여부를 반환한다.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -137,7 +141,7 @@ TOOLS = [
             "name": "ask_lifestyle_question",
             "description": "이미 특정된 제품 하나에 대해 '술 마셔도 되나', '공복에 먹어야 하나', "
                             "'이 부작용 정상인가' 같은 생활 밀착 질문에 답하기 위해 관련 문단을 검색한다. "
-                            "DUR로 답할 수 없는, 약 하나에 대한 질문에만 사용.",
+                            "의약품안전사용서비스 조회로 답할 수 없는, 약 하나에 대한 질문에만 사용.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -157,7 +161,9 @@ TOOLS = [
 
 
 def _tool_check_drug_interactions(product_names):
-    return check_multiple_drugs(product_names)
+    result = check_multiple_drugs(product_names)
+    result["data_source"] = "의약품안전사용서비스 기준"
+    return result
 
 
 def _tool_get_drug_info(product_name):
@@ -173,6 +179,11 @@ def _tool_get_drug_info(product_name):
     item_seq = result["candidates"][0]["item_seq"]
     detail = get_product_detail(item_seq)
     detail["resolved"] = True
+    detail["data_source"] = (
+        "의약품 제품허가정보 및 의약품안전사용서비스 기준"
+        if detail.get("has_interaction_data")
+        else "의약품 제품허가정보 기준"
+    )
     return detail
 
 
@@ -187,7 +198,7 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     results = search_by_symptom(symptom, current_med_ingredients=ingredients)
     if results is None:
         return {"error": f"'{symptom}'은 지원하지 않는 증상 분류입니다."}
-    return {"candidates": results}
+    return {"candidates": results, "data_source": "의약품 제품허가정보 기준"}
 
 
 def _tool_ask_lifestyle_question(product_name, question, field="NB"):
@@ -203,7 +214,12 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
     paragraphs = search_paragraphs(item_seq, field, question, top_k=3)
-    return {"resolved": True, "item_name": item_name, "relevant_paragraphs": paragraphs}
+    return {
+        "resolved": True,
+        "item_name": item_name,
+        "relevant_paragraphs": paragraphs,
+        "data_source": "의약품 제품허가정보 기준",
+    }
 
 
 TOOL_DISPATCH = {
