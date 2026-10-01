@@ -297,8 +297,34 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     return result
 
 
-def get_product_detail(item_seq: str):
-    """의약품 item_seq로 상세정보(효능효과/용법용량/주의사항/상호작용/이상반응) 조회."""
+def _fetch_live_cancel_status(item_name: str):
+    """getDrugPrdtPrmsnInq08를 item_name으로 실시간 호출해서 (CANCEL_NAME, CANCEL_DATE)를
+    가져온다. 실측으로 확인: item_seq는 이 엔드포인트의 필터로 안 먹히고 item_name만
+    정확히 필터링됨, 평균 0.5초. 네트워크 실패/타임아웃/API 오류 시 None을 반환해서
+    호출측이 배치 데이터로 폴백하게 한다 — 실시간 조회는 "더 최신 정보"를 보여주기
+    위한 보강일 뿐이라, 실패했다고 사용자에게 에러를 보여줄 이유는 없다.
+    """
+    try:
+        from drug_api import fetch_page, DrugApiError
+        result = fetch_page("prmsn", "getDrugPrdtPrmsnInq08", {"item_name": item_name},
+                             page_no=1, num_of_rows=5)
+        items = result["items"]
+        if not items:
+            return None
+        item = items[0]
+        return item.get("CANCEL_NAME"), item.get("CANCEL_DATE")
+    except Exception:
+        return None
+
+
+def get_product_detail(item_seq: str, live_status: bool = False):
+    """의약품 item_seq로 상세정보(효능효과/용법용량/주의사항/상호작용/이상반응) 조회.
+
+    live_status=True면 CANCEL_NAME/CANCEL_DATE(판매중지·취하 여부)만 배치 데이터
+    대신 실시간 API로 덮어쓴다. 사용자에게 실제로 제품 정보를 보여줄 때만(예:
+    get_drug_info) True로 켜고, 성분만 필요한 내부 조회에는 꺼서 불필요한 API
+    호출을 피한다.
+    """
     _ensure_loaded()
 
     base = _list_by_seq.get(item_seq)
@@ -316,13 +342,20 @@ def get_product_detail(item_seq: str):
     ingredients = _ingredients_by_seq.get(item_seq, [])
     has_interaction_data = any(ingr in _taboo_ingredients for ingr in ingredients)
 
+    cancel_name = base.get("CANCEL_NAME")
+    cancel_date = base.get("CANCEL_DATE")
+    if live_status:
+        live = _fetch_live_cancel_status(base.get("ITEM_NAME"))
+        if live is not None:
+            cancel_name, cancel_date = live
+
     return {
         "item_seq": item_seq,
         "item_name": base.get("ITEM_NAME"),
         "entp_name": base.get("ENTP_NAME"),
         "spclty_pblc": base.get("SPCLTY_PBLC"),
-        "cancel_name": base.get("CANCEL_NAME"),
-        "cancel_date": base.get("CANCEL_DATE"),
+        "cancel_name": cancel_name,
+        "cancel_date": cancel_date,
         "ingredients": ingredients,
         "효능효과": efcy,
         "용법용량": usemethod,

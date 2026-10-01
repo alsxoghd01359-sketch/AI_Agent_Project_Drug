@@ -79,6 +79,14 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    그대로 쓰세요. 어떤 출처를 쓸지 직접 판단하거나 "DUR" 같은 다른 용어로
    바꾸지 말고, data_source 값을 그대로 옮기세요. 실제 데이터를 전달하지 않고
    되묻기만 하는 답변(3번 예외 참고)에는 이 출처 표기 자체를 넣지 마세요.
+9. get_drug_info 결과의 cancel_name이 "정상"이 아니면(예: "취소", "취하", "폐업",
+   "유효기간만료" 등), 이 제품은 더 이상 정상적으로 판매되지 않는다는 뜻이므로
+   절대 빠뜨리지 말고 [조회된 사실] 맨 처음에 가장 먼저 알리세요(예: "이 제품은
+   {cancel_date}자로 {cancel_name} 처리되어 더 이상 정상적으로 판매되지 않습니다.").
+   이미 가지고 있는 사용자를 위해 효능/주의사항 등 나머지 정보는 계속 전달하되,
+   이 약을 계속 복용 중이라면 약사나 의사와 상담하라고 안내하세요. cancel_name이
+   "정상"이면 이 사실을 답변에 굳이 언급하지 마세요(매번 "정상 판매 중입니다"라고
+   덧붙이면 불필요한 반복입니다).
 """
 
 TOOLS = [
@@ -185,7 +193,7 @@ def _tool_get_drug_info(product_name):
                     "그대로 답변에 포함해 사용자에게 되물으세요.",
         }
     item_seq = result["candidates"][0]["item_seq"]
-    detail = get_product_detail(item_seq)
+    detail = get_product_detail(item_seq, live_status=True)
     detail["resolved"] = True
     detail["data_source"] = (
         "의약품 제품허가정보 및 의약품안전사용서비스 기준"
