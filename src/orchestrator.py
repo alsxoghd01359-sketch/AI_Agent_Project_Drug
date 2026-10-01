@@ -84,9 +84,9 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    절대 빠뜨리지 말고 [조회된 사실] 맨 처음에 가장 먼저 알리세요(예: "이 제품은
    {cancel_date}자로 {cancel_name} 처리되어 더 이상 정상적으로 판매되지 않습니다.").
    이미 가지고 있는 사용자를 위해 효능/주의사항 등 나머지 정보는 계속 전달하되,
-   이 약을 계속 복용 중이라면 약사나 의사와 상담하라고 안내하세요. cancel_name이
-   "정상"이면 이 사실을 답변에 굳이 언급하지 마세요(매번 "정상 판매 중입니다"라고
-   덧붙이면 불필요한 반복입니다).
+   이 약을 계속 복용 중이라면 약사나 의사와 상담하라고 안내하세요. (cancel_name이
+   정상인 경우 도구 결과에 그 필드 자체가 없으니, 판매 상태는 비정상일 때만
+   언급하면 됩니다.)
 10. get_drug_info나 check_drug_interactions 결과의 dur_cautions 목록에 노인주의/
     특정연령대금기/용량주의/투여기간주의/서방정분할주의/임부금기/첨가제주의 항목이
     있으면 [주의사항]에 포함하세요. content가 있으면 그 문구를 그대로 전달하고,
@@ -221,6 +221,13 @@ def _tool_get_drug_info(product_name):
         if detail.get("has_interaction_data")
         else "의약품 제품허가정보 기준"
     )
+    # cancel_name이 "정상"이면 필드 자체를 안 보여준다. 프롬프트로 "정상이면
+    # 언급하지 마라"고 아무리 명시해도 LLM이 "이 제품은 정상적으로 판매되고
+    # 있습니다"를 계속 붙이는 걸 반복 확인함 — 볼 수 없는 값은 언급할 수 없으니
+    # 아예 지워서 원천 차단한다.
+    if detail.get("cancel_name") == "정상":
+        detail.pop("cancel_name", None)
+        detail.pop("cancel_date", None)
     return detail
 
 
