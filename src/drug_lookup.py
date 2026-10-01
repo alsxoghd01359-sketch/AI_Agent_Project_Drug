@@ -41,6 +41,7 @@ _DUR_ITEM_CAUTION_FILES = [
     ("dur_cpcty_atent", "용량주의"),
     ("dur_mdctn_pd_atent", "투여기간주의"),
     ("dur_seobangjeong_partitn_atent", "서방정분할주의"),
+    ("dur_pwnm_taboo", "임부금기"),
 ]
 
 
@@ -120,15 +121,18 @@ def _load_taboo_pairs():
 
 
 def _load_dur_item_cautions():
-    """단일 품목(병용 상대 없이도 적용되는) DUR 주의사항 5종을 item_seq 기준으로 모은다.
-    "노인이 먹어도 되나요", "소아는요", "하루 몇 알까지", "며칠까지" 같은 질문에
-    답하려면 병용금기(두 약 사이)와는 별개로 이 데이터가 필요하다. 각 유형마다
-    PROHBT_CONTENT가 채워진 비율이 달라서(특정연령대금기 99%, 투여기간주의 0% 등),
-    내용이 없으면 "해당 유형으로 등록되어 있다"는 사실만, 있으면 그 문구까지 담는다.
+    """단일 품목(병용 상대 없이도 적용되는) DUR 주의사항 6종을 item_seq 기준으로 모은다.
+    "노인이 먹어도 되나요", "소아는요", "하루 몇 알까지", "며칠까지", "임신 중인데요"
+    같은 질문에 답하려면 병용금기(두 약 사이)와는 별개로 이 데이터가 필요하다. 각
+    유형마다 PROHBT_CONTENT가 채워진 비율이 달라서(특정연령대금기 99%, 임부금기 93%,
+    투여기간주의 0% 등), 내용이 없으면 "해당 유형으로 등록되어 있다"는 사실만, 있으면
+    그 문구까지 담는다.
 
     dur_prdlst.jsonl의 "TYPE_NAME  "(콤마로 여러 유형이 함께 적힌 요약 플래그) 중
-    위 5개 전용 파일에 없는 "임부금기"/"첨가제주의"만 추가로 가져온다 — 나머지
-    유형은 전용 파일 쪽이 더 상세해서 중복 안 시킨다.
+    위 6개 전용 파일에 없는 "첨가제주의"만 추가로 가져온다 — 나머지 유형은 전용
+    파일 쪽이 더 상세해서 중복 안 시킨다. (처음엔 임부금기도 dur_prdlst 플래그로만
+    가져왔는데, 내용 없는 플래그뿐이었음. dur_pwnm_taboo라는 전용 파일이 따로 있고
+    내용까지 93% 채워져 있다는 걸 뒤늦게 발견해서 그쪽으로 교체함.)
     """
     global _dur_cautions_by_seq
     cautions: dict[str, list] = {}
@@ -148,7 +152,7 @@ def _load_dur_item_cautions():
         type_flags = (r.get("TYPE_NAME  ") or "")
         if not seq or not type_flags:
             continue
-        for flag in ("임부금기", "첨가제주의"):
+        for flag in ("첨가제주의",):
             if flag in type_flags:
                 cautions.setdefault(seq, []).append({"type": flag, "content": None})
 
