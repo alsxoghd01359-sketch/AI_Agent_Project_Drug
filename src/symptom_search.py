@@ -13,7 +13,7 @@ from pathlib import Path
 
 DATA_DIR = Path("data")
 
-_FORMULATION_SUFFIXES = ["제피세립", "건조엑스", "연조엑스", "미분화", "과립", "세립", "분말"]
+_FORMULATION_SUFFIXES = ["제피세립", "건조엑스", "연조엑스", "미분화", "과립", "세립", "분말", "펠렛", "제피"]
 
 # 생약(한방 원료) 이름. 전부 나열하기보다 "양약/한방" 구분용으로만 쓰는 작은 사전.
 _HERBAL_RAW_NAMES = {
