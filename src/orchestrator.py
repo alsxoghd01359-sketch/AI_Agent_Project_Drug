@@ -39,6 +39,9 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    표기를 쓰지 마세요. 아직 아무 데이터도 조회해서 알려준 게 없는데 주의사항이나
    상담 권유를 붙이면 어색하므로, 되묻는 문장만 간결하게 전달하세요.
 4. 병용금기가 등록되지 않았다고 해서 안전하다는 뜻이 아님을 항상 명시하세요.
+   check_drug_interactions 결과에 symptom_safety_note 필드가 있으면, 그 문장을
+   고치거나 요약하지 말고 그대로 답변에 포함하세요(등록된 병용금기가 있는지
+   없는지와 무관하게 항상 포함).
 5. 도구 결과의 resolved가 false이거나 confident가 false면, 절대 특정 제품으로
    단정하지 마세요. 도구 결과에 clarification_question 필드가 있으면, 그
    문장을 직접 새로 만들지 말고 반드시 그 문장을 그대로(고치거나 요약하지 말고)
@@ -163,6 +166,11 @@ TOOLS = [
 def _tool_check_drug_interactions(product_names):
     result = check_multiple_drugs(product_names)
     result["data_source"] = "의약품안전사용서비스 기준"
+    result["symptom_safety_note"] = (
+        "이 약들을 함께 복용한 후 평소와 다른 증상(어지러움, 메스꺼움, 두드러기, "
+        "졸림 등)이 나타나면 즉시 복용을 중단하고 의사나 약사와 상담하세요. "
+        "증상이 심하면 119에 연락하세요."
+    )
     return result
 
 
