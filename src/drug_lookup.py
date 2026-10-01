@@ -29,8 +29,19 @@ _list_by_seq = None
 _ingredients_by_seq = None  # item_seq -> [MTRAL_NM, ...]
 _taboo_pairs = None  # {(성분A, 성분B) 정렬됨: PROHBT_CONTENT}
 _taboo_ingredients = None  # {병용금기 쌍에 한 번이라도 등장하는 성분명}
+_dur_cautions_by_seq = None  # item_seq -> [{"type":, "content":}, ...] (단일 품목 기준 DUR 주의사항)
+_effect_groups_by_seq = None  # item_seq -> {효능군 이름, ...} (효능군중복 체크용)
 
 _ITEM_SEQ_RE = re.compile(rb'"ITEM_SEQ"\s*:\s*"([^"]+)"')
+
+# (파일명, DUR 유형명) — 전부 item_seq 기준 단일 품목 주의사항
+_DUR_ITEM_CAUTION_FILES = [
+    ("dur_odsn_atent", "노인주의"),
+    ("dur_spcify_agrde_taboo", "특정연령대금기"),
+    ("dur_cpcty_atent", "용량주의"),
+    ("dur_mdctn_pd_atent", "투여기간주의"),
+    ("dur_seobangjeong_partitn_atent", "서방정분할주의"),
+]
 
 
 def _read_jsonl(name: str):
@@ -108,6 +119,58 @@ def _load_taboo_pairs():
         pickle.dump(pairs, f)
 
 
+def _load_dur_item_cautions():
+    """단일 품목(병용 상대 없이도 적용되는) DUR 주의사항 5종을 item_seq 기준으로 모은다.
+    "노인이 먹어도 되나요", "소아는요", "하루 몇 알까지", "며칠까지" 같은 질문에
+    답하려면 병용금기(두 약 사이)와는 별개로 이 데이터가 필요하다. 각 유형마다
+    PROHBT_CONTENT가 채워진 비율이 달라서(특정연령대금기 99%, 투여기간주의 0% 등),
+    내용이 없으면 "해당 유형으로 등록되어 있다"는 사실만, 있으면 그 문구까지 담는다.
+
+    dur_prdlst.jsonl의 "TYPE_NAME  "(콤마로 여러 유형이 함께 적힌 요약 플래그) 중
+    위 5개 전용 파일에 없는 "임부금기"/"첨가제주의"만 추가로 가져온다 — 나머지
+    유형은 전용 파일 쪽이 더 상세해서 중복 안 시킨다.
+    """
+    global _dur_cautions_by_seq
+    cautions: dict[str, list] = {}
+
+    for filename, type_name in _DUR_ITEM_CAUTION_FILES:
+        for r in _read_jsonl(filename):
+            seq = r.get("ITEM_SEQ")
+            if not seq:
+                continue
+            cautions.setdefault(seq, []).append({
+                "type": type_name,
+                "content": r.get("PROHBT_CONTENT"),
+            })
+
+    for r in _read_jsonl("dur_prdlst"):
+        seq = r.get("ITEM_SEQ")
+        type_flags = (r.get("TYPE_NAME  ") or "")
+        if not seq or not type_flags:
+            continue
+        for flag in ("임부금기", "첨가제주의"):
+            if flag in type_flags:
+                cautions.setdefault(seq, []).append({"type": flag, "content": None})
+
+    _dur_cautions_by_seq = cautions
+
+
+def _load_effect_groups():
+    """효능군중복 체크용: item_seq -> {효능군 이름, ...}.
+    서로 다른 약이지만 같은 효능군(예: 해열.진통.소염제)에 속하면, 성분은 달라도
+    효과가 겹쳐서 과다복용과 비슷한 위험이 생길 수 있다(예: NSAID 두 종류를 같이
+    복용). check_multiple_drugs에서 쌍별로 비교한다.
+    """
+    global _effect_groups_by_seq
+    groups: dict[str, set] = {}
+    for r in _read_jsonl("dur_efcy_dplct"):
+        seq = r.get("ITEM_SEQ")
+        effect = r.get("EFFECT_NAME")
+        if seq and effect:
+            groups.setdefault(seq, set()).add(effect)
+    _effect_groups_by_seq = groups
+
+
 def _ensure_loaded():
     global _easy_by_seq, _list_by_seq, _ingredients_by_seq
 
@@ -132,6 +195,12 @@ def _ensure_loaded():
 
     if _taboo_pairs is None:
         _load_taboo_pairs()
+
+    if _dur_cautions_by_seq is None:
+        _load_dur_item_cautions()
+
+    if _effect_groups_by_seq is None:
+        _load_effect_groups()
 
 
 def search_product(query: str, top_k: int = 5):
@@ -363,6 +432,7 @@ def get_product_detail(item_seq: str, live_status: bool = False):
         "상호작용": easy.get("intrcQesitm"),
         "이상반응": easy.get("seQesitm"),
         "has_interaction_data": has_interaction_data,
+        "dur_cautions": _dur_cautions_by_seq.get(item_seq, []),
     }
 
 
@@ -395,6 +465,7 @@ def check_multiple_drugs(names: list[str]):
             "item_name": best["item_name"],
             "candidates": cands,
             "ingredients": _ingredients_by_seq.get(best["item_seq"], []),
+            "dur_cautions": _dur_cautions_by_seq.get(best["item_seq"], []),
             "ambiguous": False,
         })
 
@@ -430,10 +501,31 @@ def check_multiple_drugs(names: list[str]):
                             "reason": reason,
                         })
 
+    # 3) 효능군중복 — 성분은 달라도 같은 효능군(예: 해열.진통.소염제)이면
+    #    효과가 겹쳐서 과다복용과 비슷한 위험이 생길 수 있다. 모든 쌍 조합 확인.
+    seen_effect_pairs = set()
+    effect_group_duplicates = []
+    for i in range(len(resolved)):
+        for j in range(i + 1, len(resolved)):
+            a, b = resolved[i], resolved[j]
+            if not a["item_seq"] or not b["item_seq"]:
+                continue
+            shared = _effect_groups_by_seq.get(a["item_seq"], set()) & \
+                _effect_groups_by_seq.get(b["item_seq"], set())
+            for effect in shared:
+                key = tuple(sorted([a["item_seq"], b["item_seq"]])) + (effect,)
+                if key not in seen_effect_pairs:
+                    seen_effect_pairs.add(key)
+                    effect_group_duplicates.append({
+                        "drug_a": a["item_name"], "drug_b": b["item_name"],
+                        "effect_group": effect,
+                    })
+
     return {
         "resolved_drugs": resolved,
         "unresolved_queries": unresolved,
         "duplicate_ingredients": duplicate_ingredients,
         "dur_taboo_matches": taboo_hits,
-        "has_issue": bool(duplicate_ingredients or taboo_hits),
+        "effect_group_duplicates": effect_group_duplicates,
+        "has_issue": bool(duplicate_ingredients or taboo_hits or effect_group_duplicates),
     }
