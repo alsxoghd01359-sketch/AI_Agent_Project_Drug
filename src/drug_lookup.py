@@ -22,6 +22,7 @@ _easy_by_seq = None
 _list_by_seq = None
 _ingredients_by_seq = None  # item_seq -> [MTRAL_NM, ...]
 _taboo_pairs = None  # {(성분A, 성분B) 정렬됨: PROHBT_CONTENT}
+_taboo_ingredients = None  # {병용금기 쌍에 한 번이라도 등장하는 성분명}
 
 _ITEM_SEQ_RE = re.compile(rb'"ITEM_SEQ"\s*:\s*"([^"]+)"')
 
@@ -80,11 +81,12 @@ def _load_taboo_pairs():
     870개뿐이다(중복 성분쌍이 대부분). 매번 1.3GB를 다 읽는 대신, 뽑아낸 결과를
     캐시 파일에 저장해두고 다음 실행부터는 그걸 바로 불러온다.
     """
-    global _taboo_pairs
+    global _taboo_pairs, _taboo_ingredients
     cache_path = _CACHE_DIR / "taboo_pairs.pkl"
     if cache_path.exists():
         with cache_path.open("rb") as f:
             _taboo_pairs = pickle.load(f)
+        _taboo_ingredients = {ingr for pair in _taboo_pairs for ingr in pair}
         return
 
     pairs = {}
@@ -94,6 +96,7 @@ def _load_taboo_pairs():
             pairs[tuple(sorted([a, b]))] = r.get("PROHBT_CONTENT")
 
     _taboo_pairs = pairs
+    _taboo_ingredients = {ingr for pair in pairs for ingr in pair}
     _CACHE_DIR.mkdir(exist_ok=True)
     with cache_path.open("wb") as f:
         pickle.dump(pairs, f)
@@ -290,6 +293,9 @@ def get_product_detail(item_seq: str):
     caution = " ".join(filter(None, [easy.get("atpnWarnQesitm"), easy.get("atpnQesitm")])) \
         or doc_xml_to_text(detail.get("NB_DOC_DATA"))
 
+    ingredients = _ingredients_by_seq.get(item_seq, [])
+    has_interaction_data = any(ingr in _taboo_ingredients for ingr in ingredients)
+
     return {
         "item_seq": item_seq,
         "item_name": base.get("ITEM_NAME"),
@@ -297,12 +303,13 @@ def get_product_detail(item_seq: str):
         "spclty_pblc": base.get("SPCLTY_PBLC"),
         "cancel_name": base.get("CANCEL_NAME"),
         "cancel_date": base.get("CANCEL_DATE"),
-        "ingredients": _ingredients_by_seq.get(item_seq, []),
+        "ingredients": ingredients,
         "효능효과": efcy,
         "용법용량": usemethod,
         "사용상주의사항": caution,
         "상호작용": easy.get("intrcQesitm"),
         "이상반응": easy.get("seQesitm"),
+        "has_interaction_data": has_interaction_data,
     }
 
 
