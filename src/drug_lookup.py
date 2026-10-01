@@ -10,9 +10,15 @@ import pickle
 import re
 from pathlib import Path
 
-from name_match import find_candidates
+from name_match import find_candidates, normalize_units
 from text_extract import doc_xml_to_text
 from symptom_search import _normalize_ingredient
+
+_BRACKET_RE = re.compile(r"[\(\[][^)\]]*[\)\]]")
+
+
+def _strip_brackets(name: str) -> str:
+    return _BRACKET_RE.sub("", name or "").strip()
 
 DATA_DIR = Path("data")
 _CACHE_DIR = DATA_DIR / "_cache"
@@ -239,7 +245,21 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     tied_names = {c["item_name"] for c in candidates if c["score"] == top_score}
     score_ambiguous = len(tied_names) >= 2
 
-    confident = (
+    # 괄호 성분표기·단위표기 차이를 무시하면 쿼리와 이름이 완전히 같은 후보가 "단
+    # 하나"면, 다른 후보들의 성분 겹침과 무관하게 확정으로 본다. 실측으로 확인:
+    # "판피린티정"(정확히 일치, 점수 100)이나 "탁센연질캡슐"(정확히 일치, 점수 90)
+    # 처럼 명확한 쿼리에도, top_k로 같이 딸려온 전혀 무관한 저점 후보들(예: "엠티정",
+    # "한솔나프록센연질캡슐")이 성분이 달라서 overlap_ratio를 끌어내려 거짓음성이
+    # 발생했음. 정확히 일치하는 후보가 2개 이상이면(동명 제품) 이 지름길을 쓰지
+    # 않고 아래 일반 로직으로 넘어간다.
+    normalized_query_base = _strip_brackets(normalize_units(query))
+    exact_matches = [
+        c for c in candidates
+        if _strip_brackets(normalize_units(c["item_name"])) == normalized_query_base
+    ]
+    exact_unique_match = len(exact_matches) == 1
+
+    confident = exact_unique_match or (
         candidates[0]["score"] >= min_score
         and overlap_ratio >= overlap_threshold
         and len(candidates) >= min_candidates
