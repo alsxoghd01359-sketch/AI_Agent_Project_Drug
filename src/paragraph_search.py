@@ -93,9 +93,23 @@ def _iter_articles(xml_str: str | None):
             yield (title, paras)
 
 
-def _chunk_labeled_paragraphs(xml_str: str | None) -> list[str]:
-    chunks = []
+def _chunk_with_parents(xml_str: str | None) -> tuple[list[str], list[str]]:
+    """검색 단위(세분화된 하위 문항, 전략5)와 그 검색 단위가 속한 상위 ARTICLE
+    전체 텍스트를 나란히(같은 인덱스로) 반환한다.
+
+    실측 확인: 쪼갤수록 임베딩 유사도가 오른다(예: 용각산 "술 마셔도 되나" 기준
+    하위항목 단위 0.2764 -> 쉼표로 더 쪼갠 단위 0.3352). 그래서 검색(임베딩·
+    재랭킹)은 세분화된 단위로 정밀하게 하되, 재랭킹까지 끝난 뒤 LLM에게 최종
+    근거로 보여줄 때는 그 하위항목이 속한 ARTICLE 전체를 준다 — "5) 고령자"
+    처럼 한 줄만 보여주면 맥락이 잘리는 문제를, 검색 정밀도를 희생하지 않고
+    해결한다(Parent Document Retrieval 패턴: 검색은 작은 단위, 생성은 큰 단위).
+    """
+    chunks: list[str] = []
+    parents: list[str] = []
     for title, paras in _iter_articles(xml_str):
+        if not paras:
+            continue
+        full_article = " ".join(filter(None, [title] + paras))
         current_heading = title or ""
         for text in paras:
             if _TOP_LEVEL_RE.match(text):
@@ -105,7 +119,13 @@ def _chunk_labeled_paragraphs(xml_str: str | None) -> list[str]:
                 chunks.append(f"[{current_heading}] {text}")
             else:
                 chunks.append(text)
-    return [c for c in chunks if c.strip()]
+            parents.append(full_article)
+    return chunks, parents
+
+
+def _chunk_labeled_paragraphs(xml_str: str | None) -> list[str]:
+    chunks, _ = _chunk_with_parents(xml_str)
+    return chunks
 
 
 def _get_paragraphs(item_seq: str, field: str) -> list[str]:
@@ -115,6 +135,14 @@ def _get_paragraphs(item_seq: str, field: str) -> list[str]:
     if not rec:
         return []
     return _chunk_labeled_paragraphs(rec.get(f"{field}_DOC_DATA"))
+
+
+def _get_paragraphs_with_parents(item_seq: str, field: str) -> tuple[list[str], list[str]]:
+    _ensure_detail_loaded()
+    rec = _detail_by_seq.get(item_seq)
+    if not rec:
+        return [], []
+    return _chunk_with_parents(rec.get(f"{field}_DOC_DATA"))
 
 
 def _embed(texts: list[str]) -> list[np.ndarray]:
@@ -254,7 +282,7 @@ def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
     반환: [{"text":, "score":}, ...] (score는 임베딩 1차 점수 참고용, 순서는
     재랭킹 결과를 따른다)
     """
-    paragraphs = _get_paragraphs(item_seq, field)
+    paragraphs, parents = _get_paragraphs_with_parents(item_seq, field)
     if not paragraphs:
         return []
 
@@ -282,9 +310,23 @@ def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
             break
 
     pool = [
-        {"text": paragraphs[i], "score": max(scores_orig[i], scores_formal[i])}
+        {"text": paragraphs[i], "parent": parents[i], "score": max(scores_orig[i], scores_formal[i])}
         for i in merged
     ]
     pool.sort(key=lambda r: -r["score"])
 
-    return _rerank(query, pool, top_k)
+    reranked = _rerank(query, pool, top_k)
+
+    # 재랭킹까지는 세분화된 하위항목 텍스트로 정밀하게 판단하되(검색 단위),
+    # 최종적으로 LLM에게 보여줄 때는 그 하위항목이 속한 ARTICLE 전체로
+    # 확장한다(생성 단위) — "5) 고령자"처럼 한 줄만 보여줘서 맥락이 잘리는
+    # 문제를 검색 정밀도 희생 없이 해결한다. 여러 하위항목이 같은 ARTICLE에
+    # 속하면 중복 표시하지 않고 가장 순위 높은 것만 남긴다.
+    result = []
+    seen_parents = set()
+    for r in reranked:
+        if r["parent"] in seen_parents:
+            continue
+        seen_parents.add(r["parent"])
+        result.append({"text": r["parent"], "score": r["score"]})
+    return result
