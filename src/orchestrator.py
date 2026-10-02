@@ -63,15 +63,34 @@ def _detect_citations(question: str, lifestyle_result: dict | None, answer: str)
     return [n for n in (int(x) for x in re.findall(r"\d+", reply)) if 1 <= n <= len(candidates)]
 
 
-def _build_score_debug_block(lifestyle_result, cited_nums, answer_text):
+def _truncate_for_debug(value, max_len=300):
+    """채점용 진단 블록에 조회 데이터를 그대로 덤프하면 사용상주의사항 전문처럼
+    긴 필드 때문에 가독성이 떨어진다. 사람이 읽는 화면에만 자르고, 실제 채점
+    (_auto_grade)에는 원본 전체를 그대로 넘긴다."""
+    if isinstance(value, str) and len(value) > max_len:
+        return value[:max_len] + f" …(이하 생략, 전체 {len(value)}자)"
+    if isinstance(value, list):
+        return [_truncate_for_debug(v, max_len) for v in value]
+    if isinstance(value, dict):
+        return {k: _truncate_for_debug(v, max_len) for k, v in value.items()}
+    return value
+
+
+def _build_score_debug_block(last_tool_name, last_tool_result, lifestyle_result, cited_nums, answer_text):
     """채점 기준 4가지(검색 적중률/답 정확도/근거 표시 정확도/무응답 처리)에 맞춰
     참고 자료를 조립한다. "답 정확도"는 정답을 모르는 상태라 시스템이 스스로 판정할
     수 없으므로, 판단에 필요한 원재료(후보 전체·인용된 근거·무응답 여부)만 제공하고
     실제 채점은 사람이 하도록 한다."""
     lines = ["", "──────── [채점용 진단 정보 | SCORE_DEBUG] ────────"]
     if lifestyle_result is None:
-        lines.append("※ 이번 턴은 ask_lifestyle_question(임베딩 검색)을 쓰지 않았습니다 "
-                      "— DUR 구조화 조회 등 다른 경로라 유사도/검색 적중률 지표가 없습니다.")
+        lines.append(f"※ 이번 턴은 ask_lifestyle_question(임베딩 검색)을 쓰지 않았습니다 "
+                      f"— {last_tool_name or '(도구 호출 없음)'} 경로라 유사도/검색 적중률 지표가 없습니다.")
+        if last_tool_result:
+            lines.append("[조회된 데이터] 이 답변의 근거가 된 조회 결과(긴 필드는 일부만 표시):")
+            data_str = json.dumps(_truncate_for_debug(last_tool_result), ensure_ascii=False, indent=2, default=str)
+            lines.extend("  " + ln for ln in data_str.splitlines())
+        else:
+            lines.append("[조회된 데이터] 도구 호출 자체가 없었습니다(응급 안내, 되묻기 등).")
     else:
         candidates = lifestyle_result.get("relevant_paragraphs", [])
         lines.append(f"[검색 적중률] top-{len(candidates)} 후보 전체(유사도 내림차순) — "
@@ -533,7 +552,7 @@ class Conversation:
                 self.messages.append({"role": "assistant", "content": content})
                 if SCORE_DEBUG:
                     cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
-                    content += _build_score_debug_block(last_lifestyle_result, cited_nums, content)
+                    content += _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, content)
                     grades = _auto_grade(user_message, last_tool_name, last_tool_result, content)
                     content += _build_grading_block(grades)
                 return content
