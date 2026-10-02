@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -19,6 +20,85 @@ load_dotenv()
 
 _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 CHAT_MODEL = "gpt-4o-mini"
+
+# 채점용 진단 정보(검색 적중률/근거 표시 정확도/무응답 처리 참고 자료)를 답변 끝에
+# 덧붙일지 여부. .env의 SCORE_DEBUG=true/false로 켜고 끈다(코드 수정 없이 토글).
+# 기본값 false — 이 줄 또는 .env의 SCORE_DEBUG 설정만 지우면 이 기능은 완전히 비활성화된다.
+SCORE_DEBUG = os.getenv("SCORE_DEBUG", "false").strip().lower() in ("1", "true", "yes")
+
+_NO_ANSWER_MARKERS = ("찾을 수 없습니다", "등록되어 있지 않습니다", "등록된 정보가 없습니다")
+
+_CITATION_FOLLOWUP_PROMPT = """질문: "{question}"
+
+[후보 목록]
+{candidates}
+
+위 후보들을 보고 작성된 아래 답변을 보세요:
+{answer}
+
+이 답변이 실제로 근거로 사용한 후보 번호를 전부 쉼표로 구분해서만 답하세요(예: "1, 3").
+근거로 쓴 후보가 없으면 "없음"이라고만 답하세요. 다른 말은 하지 마세요."""
+
+
+def _detect_citations(question: str, lifestyle_result: dict | None, answer: str) -> list[int]:
+    """메인 답변 생성 프롬프트(규칙이 이미 많음)에 "근거 번호를 같이 밝혀라"를
+    끼워 넣었더니 LLM이 자주 생략하는 걸 확인했다 — 지시가 여러 규칙 속에 묻히면
+    잘 안 지켜진다. 그래서 별도의 짧고 단순한 후속 질문으로 분리하니 안정적으로
+    따랐다(채점 전용 스크립트에서 검증). SCORE_DEBUG가 꺼져 있으면 이 함수 자체가
+    호출되지 않으므로 평소엔 추가 비용이 없다."""
+    if not lifestyle_result:
+        return []
+    candidates = lifestyle_result.get("relevant_paragraphs", [])
+    if not candidates:
+        return []
+    cand_text = "\n".join(f"{i + 1}. {c['text']}" for i, c in enumerate(candidates))
+    prompt = _CITATION_FOLLOWUP_PROMPT.format(question=question, candidates=cand_text, answer=answer)
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL, temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    reply = resp.choices[0].message.content or ""
+    if "없음" in reply:
+        return []
+    return [n for n in (int(x) for x in re.findall(r"\d+", reply)) if 1 <= n <= len(candidates)]
+
+
+def _build_score_debug_block(lifestyle_result, cited_nums, answer_text):
+    """채점 기준 4가지(검색 적중률/답 정확도/근거 표시 정확도/무응답 처리)에 맞춰
+    참고 자료를 조립한다. "답 정확도"는 정답을 모르는 상태라 시스템이 스스로 판정할
+    수 없으므로, 판단에 필요한 원재료(후보 전체·인용된 근거·무응답 여부)만 제공하고
+    실제 채점은 사람이 하도록 한다."""
+    lines = ["", "──────── [채점용 진단 정보 | SCORE_DEBUG] ────────"]
+    if lifestyle_result is None:
+        lines.append("※ 이번 턴은 ask_lifestyle_question(임베딩 검색)을 쓰지 않았습니다 "
+                      "— DUR 구조화 조회 등 다른 경로라 유사도/검색 적중률 지표가 없습니다.")
+    else:
+        candidates = lifestyle_result.get("relevant_paragraphs", [])
+        lines.append(f"[검색 적중률] top-{len(candidates)} 후보 전체(유사도 내림차순) — "
+                      "정답 근거가 이 안에 있는지 확인하세요:")
+        for i, c in enumerate(candidates, 1):
+            lines.append(f"  {i}. {c['score']:.4f} | {c['text'][:80]}")
+        lines.append("")
+        if cited_nums:
+            lines.append("[근거 표시 정확도] 실제 답변에 인용됐다고 모델이 밝힌 후보:")
+            for n in cited_nums:
+                if 1 <= n <= len(candidates):
+                    c = candidates[n - 1]
+                    lines.append(f"  {n}번 ({c['score']:.4f}) | {c['text'][:80]}")
+                else:
+                    lines.append(f"  {n}번 — 범위를 벗어난 번호(모델 응답 오류 가능성)")
+        elif not candidates:
+            lines.append("[근거 표시 정확도] 후보 자체가 없었습니다(재랭킹 단계에서 전부 무관하다고 걸러짐).")
+        else:
+            lines.append("[근거 표시 정확도] 후보는 있었지만 모델이 그 중 어느 것도 "
+                          "근거로 쓰지 않았다고 답했습니다(답변이 후보 내용을 벗어난 "
+                          "방식으로 작성됐을 가능성 — 확인 필요).")
+    no_answer = any(m in (answer_text or "") for m in _NO_ANSWER_MARKERS)
+    lines.append("")
+    lines.append(f"[없는 질문 처리] 이번 답변이 \"근거 없음\"으로 처리됨: {'예' if no_answer else '아니오'}")
+    lines.append("[답 정확도] 정답은 이 시스템이 알 수 없으므로, 위 근거와 최종 답변을 보고 직접 판정하세요.")
+    lines.append("──────────────────────────────────────────")
+    return "\n".join(lines)
 
 SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을 전달하는 복약 정보 도우미입니다.
 
@@ -348,6 +428,7 @@ class Conversation:
             return emergency["message"]
 
         self.messages.append({"role": "user", "content": user_message})
+        last_lifestyle_result = None
 
         for _ in range(max_tool_rounds):
             response = _client.chat.completions.create(
@@ -359,8 +440,12 @@ class Conversation:
             msg = response.choices[0].message
 
             if not msg.tool_calls:
-                self.messages.append({"role": "assistant", "content": msg.content})
-                return msg.content
+                content = msg.content
+                self.messages.append({"role": "assistant", "content": content})
+                if SCORE_DEBUG:
+                    cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
+                    content += _build_score_debug_block(last_lifestyle_result, cited_nums, content)
+                return content
 
             self.messages.append(msg)
             for tool_call in msg.tool_calls:
@@ -368,6 +453,8 @@ class Conversation:
                 fn_args = json.loads(tool_call.function.arguments)
                 fn = TOOL_DISPATCH.get(fn_name)
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
+                if fn_name == "ask_lifestyle_question":
+                    last_lifestyle_result = result
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
