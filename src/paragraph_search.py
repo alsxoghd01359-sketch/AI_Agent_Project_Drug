@@ -124,18 +124,68 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
+REWRITE_MODEL = "gpt-4o-mini"
+_REWRITE_PROMPT = (
+    "다음 구어체 질문을 의약품 첨부문서(사용상주의사항) 문체에 맞는 격식체 질문으로 "
+    "바꿔라. 질문만 출력하고 다른 말은 하지 마라.\n\n질문: {query}"
+)
+
+
+def _rewrite_formal(query: str) -> str:
+    """구어체 질문과 공식 문서 문체 간의 격차 때문에 임베딩 유사도가 떨어지는 문제를
+    완화한다. 실측 확인: 일라정 x "콩팥이 안좋은데 먹어도 되나요?" 원본 질문으로는
+    정답 문단이 top-20 밖(13위, 그나마도 우연한 키워드 중복)이었는데, 격식체로
+    재작성한 질문으로는 진짜 정답 문단이 5위(0.39)까지 올라왔다."""
+    resp = _get_client().chat.completions.create(
+        model=REWRITE_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _REWRITE_PROMPT.format(query=query)}],
+    )
+    return resp.choices[0].message.content.strip()
+
+
 def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
     """순수 임베딩 기반 문단(라벨링된 하위항목 단위) 검색.
-    반환: [{"text":, "score":}, ...] (score 내림차순)
+
+    원본 질문과 격식체 재작성 질문 두 랭킹을 번갈아 섞어(라운드로빈) 중복 없이
+    top_k개를 채운다. 점수로 두 랭킹을 직접 경쟁시키면(예: 둘 중 더 높은 점수
+    채택) 한쪽 질문이 전반적으로 더 높은 점수대를 갖는 경우 다른 쪽에서만 상위에
+    오른 정답이 묻혀버리는 걸 실측으로 확인했다 — 용각산 x 음주는 원본 질문
+    랭킹에서만 정답이 2위(격식체 랭킹에선 top-8 밖으로 밀림), 일라정 x
+    "콩팥이 안좋은데 먹어도 되나요"는 격식체 랭킹에서만 정답이 5위(원본
+    랭킹에선 안 보임)였다. 순위 교대 방식은 점수 크기와 무관하게 양쪽의
+    1위, 2위, ...를 동등하게 반영하므로 이런 비대칭을 보존한다.
+    반환: [{"text":, "score":}, ...] (score 내림차순, score는 두 질문 중 더 높은 값)
     """
     paragraphs = _get_paragraphs(item_seq, field)
     if not paragraphs:
         return []
 
+    formal_query = _rewrite_formal(query)
     para_vecs = _embed(paragraphs)
-    qvec = _embed([query])[0]
+    qvec_orig, qvec_formal = _embed([query, formal_query])
 
-    scored = [{"text": text, "score": _cosine(qvec, vec)} for text, vec in zip(paragraphs, para_vecs)]
-    scored.sort(key=lambda r: -r["score"])
+    scores_orig = [_cosine(qvec_orig, v) for v in para_vecs]
+    scores_formal = [_cosine(qvec_formal, v) for v in para_vecs]
+    rank_orig = sorted(range(len(paragraphs)), key=lambda i: -scores_orig[i])
+    rank_formal = sorted(range(len(paragraphs)), key=lambda i: -scores_formal[i])
 
-    return scored[:top_k]
+    seen = set()
+    merged = []
+    for pos in range(len(paragraphs)):
+        for ranking in (rank_orig, rank_formal):
+            if len(merged) >= top_k:
+                break
+            idx = ranking[pos]
+            if idx not in seen:
+                seen.add(idx)
+                merged.append(idx)
+        if len(merged) >= top_k:
+            break
+
+    result = [
+        {"text": paragraphs[i], "score": max(scores_orig[i], scores_formal[i])}
+        for i in merged
+    ]
+    result.sort(key=lambda r: -r["score"])
+    return result
