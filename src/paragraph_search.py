@@ -20,7 +20,12 @@ from openai import OpenAI
 from text_extract import doc_xml_to_text
 
 DATA_DIR = Path("data")
-EMBED_MODEL = "text-embedding-3-small"
+# 실측 확인: 짧은 한국어 질문("술 마셔도 되나")과 긴 공식 문서 간 유사도를
+# text-embedding-3-small로 계산하면, 완전히 무관한 문장("오늘 날씨가 좋네요")이
+# 실제 정답 문단보다 유사도가 더 높게 나올 정도로 변별력이 없었다(0.29 vs 0.16).
+# text-embedding-3-large는 같은 비교에서 정답(0.40~0.47)이 무관한 문장(0.28)보다
+# 뚜렷하게 높게 나와 정상적으로 구분됨을 확인하고 교체함.
+EMBED_MODEL = "text-embedding-3-large"
 
 # 자주 나오는 생활질문 주제의 동의어 그룹. 필요에 따라 계속 추가.
 TOPIC_SYNONYMS = [
