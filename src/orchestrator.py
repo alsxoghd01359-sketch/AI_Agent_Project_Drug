@@ -100,6 +100,93 @@ def _build_score_debug_block(lifestyle_result, cited_nums, answer_text):
     lines.append("──────────────────────────────────────────")
     return "\n".join(lines)
 
+
+_GRADING_CRITERIA = [
+    ("검색적중률", "검색 적중률"),
+    ("답정확도", "답 정확도"),
+    ("근거표시정확도", "근거 표시 정확도"),
+    ("없는질문처리", "없는 질문 처리"),
+]
+
+_GRADING_PROMPT = """당신은 의약품 정보 챗봇의 답변을 채점하는 평가자입니다. 아래 4개 기준으로
+각각 1.0(완전히 정확) / 0.5(부분적으로 정확) / 0.0(틀림) 중 하나를 매기고, 한 줄 이유를 쓰세요.
+
+[질문]
+{question}
+
+[조회된 데이터] (도구: {tool_name})
+{data}
+
+[최종 답변]
+{answer}
+
+채점 기준:
+1. 검색적중률: 조회된 데이터 안에 이 질문에 실제로 답이 되는 내용이 있었는가?
+   (유사도 점수가 있으면 참고하되, 실제로 내용이 맞는지 직접 읽고 판단하세요.
+   구조화 조회라 유사도가 없으면 그 데이터 안에 질문과 관련된 필드가 있었는지로 판단)
+2. 답정확도: 최종 답변의 내용이 조회된 데이터와 실제로 일치하는가? 데이터에 없는
+   내용을 지어내거나 왜곡했으면 0.0, 일부만 왜곡/과장했으면 0.5, 완전히 일치하면 1.0.
+   답변이 "찾을 수 없다/등록된 정보가 없다"인 경우, 실제로 데이터에 답이 없는 게
+   맞다면 이것도 "데이터와 일치하는 정확한 답"이므로 1.0을 주세요(4번 기준과
+   별개로, 여기서 0.0을 줄 이유가 없습니다) — 반대로 데이터에 답이 있는데도
+   "찾을 수 없다"고 했다면 그때 0.0입니다.
+3. 근거표시정확도: 답변이 구체적인 원문·근거를 명확히 제시했는가, 아니면 막연하게만
+   설명했는가?
+4. 없는질문처리: 데이터에 답이 없으면 정직하게 "찾을 수 없다/등록된 정보가 없다"고
+   했는가? 데이터에 답이 있는데 억지로 "없다"고 하거나, 반대로 없는데 답을 지어낸
+   경우 0.0으로 매기세요.
+
+이 점수는 참고용 자동 채점이며 사람의 최종 판단을 대체하지 않습니다. 그래도 최대한
+근거 데이터를 꼼꼼히 읽고 신중하게 채점하세요.
+
+반드시 이 JSON 형식으로만 답하세요(다른 텍스트 금지):
+{{"검색적중률": {{"점수": 0, "이유": "..."}}, "답정확도": {{"점수": 0, "이유": "..."}},
+  "근거표시정확도": {{"점수": 0, "이유": "..."}}, "없는질문처리": {{"점수": 0, "이유": "..."}}}}"""
+
+
+def _auto_grade(question: str, tool_name: str | None, tool_result: dict | None, answer: str):
+    """사용자가 준 4개 채점 기준(검색 적중률/답 정확도/근거 표시 정확도/없는 질문
+    처리)을 LLM 심사위원에게 맡겨 0.0/0.5/1.0으로 자동 채점한다.
+
+    한계: "답정확도"와 "검색적중률"은 원칙적으로 외부에서 정해진 정답(ground truth)과
+    비교해야 하는데, 이 시스템은 정답지를 갖고 있지 않다. 그래서 실제로 채점하는 건
+    "객관적 진실과 일치하는가"가 아니라 "조회된 데이터 자체와 앞뒤가 맞는가
+    (grounded한가)"이다 — 데이터 자체가 틀렸거나 애매하면 이 자동 채점도 똑같이
+    틀릴 수 있다. 참고용으로만 쓰고 최종 채점은 사람이 하는 걸 전제로 한다."""
+    if not tool_result:
+        return None
+    data_str = json.dumps(tool_result, ensure_ascii=False, default=str)[:4000]
+    prompt = _GRADING_PROMPT.format(question=question, tool_name=tool_name or "(없음)", data=data_str, answer=answer)
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL, temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    try:
+        return json.loads(resp.choices[0].message.content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _build_grading_block(grades):
+    lines = ["", "[자동 채점 | LLM 심사위원, 참고용 — 사람 채점을 대체하지 않음]"]
+    if not grades:
+        lines.append("  채점에 쓸 조회 데이터가 없어 건너뜀.")
+        return "\n".join(lines)
+    total = 0.0
+    for key, label in _GRADING_CRITERIA:
+        g = grades.get(key, {}) if isinstance(grades, dict) else {}
+        score = g.get("점수", 0) if isinstance(g, dict) else 0
+        reason = g.get("이유", "") if isinstance(g, dict) else ""
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            score = 0.0
+        total += score
+        lines.append(f"  {label}: {score:g} — {reason}")
+    lines.append(f"  합계: {total:g} / 4.0")
+    return "\n".join(lines)
+
 SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을 전달하는 복약 정보 도우미입니다.
 
 절대 원칙:
@@ -429,6 +516,8 @@ class Conversation:
 
         self.messages.append({"role": "user", "content": user_message})
         last_lifestyle_result = None
+        last_tool_name = None
+        last_tool_result = None
 
         for _ in range(max_tool_rounds):
             response = _client.chat.completions.create(
@@ -445,6 +534,8 @@ class Conversation:
                 if SCORE_DEBUG:
                     cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
                     content += _build_score_debug_block(last_lifestyle_result, cited_nums, content)
+                    grades = _auto_grade(user_message, last_tool_name, last_tool_result, content)
+                    content += _build_grading_block(grades)
                 return content
 
             self.messages.append(msg)
@@ -455,6 +546,8 @@ class Conversation:
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
                 if fn_name == "ask_lifestyle_question":
                     last_lifestyle_result = result
+                last_tool_name = fn_name
+                last_tool_result = result
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
