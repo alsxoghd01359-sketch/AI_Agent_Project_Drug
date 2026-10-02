@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 from openai import OpenAI
 
+import chroma_setup
+
 DATA_DIR = Path("data")
 EMBED_MODEL = "text-embedding-3-large"
 
@@ -124,6 +126,57 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
+_CHROMA_COLLECTION = None
+
+
+def _get_chroma_collection():
+    global _CHROMA_COLLECTION
+    if _CHROMA_COLLECTION is None:
+        client = chroma_setup.get_client()
+        _CHROMA_COLLECTION = chroma_setup.get_or_create_collection(
+            client, "lifestyle_paragraphs", real_embedding=True
+        )
+    return _CHROMA_COLLECTION
+
+
+def _embed_paragraphs_cached(item_seq: str, field: str, paragraphs: list[str]) -> list[np.ndarray]:
+    """같은 제품·같은 필드의 문단 임베딩을 ChromaDB에 캐싱한다.
+
+    기존에는 같은 제품에 대한 질문이 들어올 때마다 문서 전체를 매번 다시
+    임베딩했다 — 실측으로 질문 1건 비용의 약 60%가 이 "문서 전체 재임베딩"
+    이었다(예: 169개 청크 문서에서 23,487 토큰). 같은 제품은 자주 재질문되므로
+    한 번 계산한 임베딩을 영구 저장해두고 재사용한다.
+
+    청킹 로직이 바뀌어 문단 수나 내용이 달라지면(예: 전략 변경, 원본 XML
+    갱신) 캐시된 문서 텍스트가 현재 파싱 결과와 달라지므로, 그 경우엔 캐시를
+    무시하고 다시 계산해서 덮어쓴다 — 오래된 청킹 결과가 조용히 재사용되는
+    걸 막기 위함.
+    """
+    if not paragraphs:
+        return []
+
+    collection = _get_chroma_collection()
+    ids = [f"{item_seq}:{field}:{i}" for i in range(len(paragraphs))]
+
+    cached = collection.get(ids=ids, include=["embeddings", "documents"])
+    returned_ids = cached.get("ids") or []
+    cached_embeddings = cached.get("embeddings")
+    id_to_doc = dict(zip(returned_ids, cached.get("documents") or []))
+    id_to_emb = dict(zip(returned_ids, cached_embeddings)) if cached_embeddings is not None else {}
+
+    if len(returned_ids) == len(ids) and all(id_to_doc.get(i) == p for i, p in zip(ids, paragraphs)):
+        return [np.array(id_to_emb[i]) for i in ids]
+
+    vecs = _embed(paragraphs)
+    collection.upsert(
+        ids=ids,
+        embeddings=[v.tolist() for v in vecs],
+        documents=paragraphs,
+        metadatas=[{"item_seq": item_seq, "field": field} for _ in paragraphs],
+    )
+    return vecs
+
+
 REWRITE_MODEL = "gpt-4o-mini"
 _REWRITE_PROMPT = (
     "다음 구어체 질문을 의약품 첨부문서(사용상주의사항) 문체에 맞는 격식체 질문으로 "
@@ -144,25 +197,69 @@ def _rewrite_formal(query: str) -> str:
     return resp.choices[0].message.content.strip()
 
 
-def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
-    """순수 임베딩 기반 문단(라벨링된 하위항목 단위) 검색.
+POOL_SIZE = 40
+RERANK_MODEL = "gpt-4o-mini"
+_RERANK_PROMPT = """사용자 질문: "{query}"
 
-    원본 질문과 격식체 재작성 질문 두 랭킹을 번갈아 섞어(라운드로빈) 중복 없이
-    top_k개를 채운다. 점수로 두 랭킹을 직접 경쟁시키면(예: 둘 중 더 높은 점수
-    채택) 한쪽 질문이 전반적으로 더 높은 점수대를 갖는 경우 다른 쪽에서만 상위에
-    오른 정답이 묻혀버리는 걸 실측으로 확인했다 — 용각산 x 음주는 원본 질문
-    랭킹에서만 정답이 2위(격식체 랭킹에선 top-8 밖으로 밀림), 일라정 x
-    "콩팥이 안좋은데 먹어도 되나요"는 격식체 랭킹에서만 정답이 5위(원본
+아래는 의약품 사용상주의사항에서 임베딩 유사도로 1차 검색된 후보 문단들입니다.
+각 후보가 이 질문에 실제로 답이 되는 정도에 따라, 관련도가 높은 순서대로
+번호만 쉼표로 구분해서 나열하세요(예: "3,7,1"). 질문과 실제로 무관한 후보는
+목록에서 빼세요. 관련 있는 후보가 하나도 없으면 "없음"이라고만 답하세요.
+
+[후보]
+{candidates}
+"""
+
+
+def _rerank(query: str, pool: list[dict], top_k: int) -> list[dict]:
+    """임베딩 1차 검색(POOL_SIZE개)은 재현율(정답을 후보 풀에 넣는 것)을 위한
+    단계이고, 여기서 실제 관련도 판단과 정렬을 맡는다. 코사인 유사도는 거대
+    문서(100개+ 청크)에서 비슷한 문구가 반복되면 희석되어 순위가 많이 밀리는
+    걸 실측으로 확인했다 — 심바로드정(134개 청크) x "간이 안좋은데 먹어도
+    되나요?"는 정답 조항이 원본 질문 29위, 격식체 재작성도 11위였다. 임베딩
+    없이 LLM이 직접 "이 문단이 이 질문에 답이 되는가"를 판단하면 반복되는
+    유사 문구에 흔들리지 않는다."""
+    cand_text = "\n".join(f"{i + 1}. {c['text']}" for i, c in enumerate(pool))
+    resp = _get_client().chat.completions.create(
+        model=RERANK_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _RERANK_PROMPT.format(query=query, candidates=cand_text)}],
+    )
+    order = [int(n) for n in re.findall(r"\d+", resp.choices[0].message.content)]
+
+    reranked = []
+    seen = set()
+    for n in order:
+        if 1 <= n <= len(pool) and n not in seen:
+            seen.add(n)
+            reranked.append(pool[n - 1])
+    return reranked[:top_k]
+
+
+def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
+    """임베딩 1차 검색(재현율) + LLM 재랭킹(정확한 순서) 2단계 문단 검색.
+
+    1단계: 원본 질문과 격식체 재작성 질문 두 랭킹을 번갈아 섞어(라운드로빈)
+    중복 없이 POOL_SIZE개를 채운다. 점수로 두 랭킹을 직접 경쟁시키면(예: 둘
+    중 더 높은 점수 채택) 한쪽 질문이 전반적으로 더 높은 점수대를 갖는 경우
+    다른 쪽에서만 상위인 정답이 묻혀버리는 걸 실측으로 확인했다 — 용각산 x
+    음주는 원본 질문 랭킹에서만 정답이 2위(격식체 랭킹에선 top-8 밖), 일라정
+    x "콩팥이 안좋은데 먹어도 되나요"는 격식체 랭킹에서만 정답이 5위(원본
     랭킹에선 안 보임)였다. 순위 교대 방식은 점수 크기와 무관하게 양쪽의
     1위, 2위, ...를 동등하게 반영하므로 이런 비대칭을 보존한다.
-    반환: [{"text":, "score":}, ...] (score 내림차순, score는 두 질문 중 더 높은 값)
+
+    2단계: POOL_SIZE개 후보를 LLM에게 보여주고 실제 관련도 순으로 재정렬시켜
+    top_k개만 추린다(_rerank 참고).
+
+    반환: [{"text":, "score":}, ...] (score는 임베딩 1차 점수 참고용, 순서는
+    재랭킹 결과를 따른다)
     """
     paragraphs = _get_paragraphs(item_seq, field)
     if not paragraphs:
         return []
 
     formal_query = _rewrite_formal(query)
-    para_vecs = _embed(paragraphs)
+    para_vecs = _embed_paragraphs_cached(item_seq, field, paragraphs)
     qvec_orig, qvec_formal = _embed([query, formal_query])
 
     scores_orig = [_cosine(qvec_orig, v) for v in para_vecs]
@@ -170,22 +267,24 @@ def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
     rank_orig = sorted(range(len(paragraphs)), key=lambda i: -scores_orig[i])
     rank_formal = sorted(range(len(paragraphs)), key=lambda i: -scores_formal[i])
 
+    pool_size = min(POOL_SIZE, len(paragraphs))
     seen = set()
     merged = []
     for pos in range(len(paragraphs)):
         for ranking in (rank_orig, rank_formal):
-            if len(merged) >= top_k:
+            if len(merged) >= pool_size:
                 break
             idx = ranking[pos]
             if idx not in seen:
                 seen.add(idx)
                 merged.append(idx)
-        if len(merged) >= top_k:
+        if len(merged) >= pool_size:
             break
 
-    result = [
+    pool = [
         {"text": paragraphs[i], "score": max(scores_orig[i], scores_formal[i])}
         for i in merged
     ]
-    result.sort(key=lambda r: -r["score"])
-    return result
+    pool.sort(key=lambda r: -r["score"])
+
+    return _rerank(query, pool, top_k)

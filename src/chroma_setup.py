@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PERSIST_DIR = "./chroma_db"
-OPENAI_EMBED_MODEL = "text-embedding-3-small"
+OPENAI_EMBED_MODEL = "text-embedding-3-large"
 
 
 class DummyEmbeddingFunction:
