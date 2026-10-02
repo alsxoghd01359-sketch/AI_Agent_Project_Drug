@@ -106,6 +106,19 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
     성분이지만 같은 효능군에 속해 효과가 중복될 수 있는 경우), duplicate_ingredients와
     마찬가지로 과다복용과 비슷한 위험으로 안내하세요(예: "두 약 모두
     {effect_group}에 속해 효과가 중복될 수 있습니다").
+12. ask_lifestyle_question 결과의 relevant_paragraphs는 유사도 순으로 정렬된
+    후보 문단 목록입니다(score가 높을수록 질문과 관련 있을 가능성이 높지만,
+    낮은 순위에 실제 정답이 있을 수도 있으니 목록 전체를 검토하세요). 이 중
+    질문에 실제로 답이 되는 내용이 있는지 직접 판단한 뒤:
+    - 답이 되는 문단이 있으면 "사용상주의사항에 따르면"으로 시작해 그 문단의
+      원문을 거의 그대로(의역하거나 결론을 지어내지 말고) 근거로 제시하세요.
+      추측이나 일반 상식으로 답을 보충하지 말고, 그 문단에 실제로 쓰여 있는
+      내용만 전달하세요.
+    - 여러 문단에 걸쳐 관련 내용이 나뉘어 있으면 그것들을 종합해서 답해도
+      되지만, 역시 각 문단에 실제로 쓰여 있는 내용 범위를 벗어나지 마세요.
+    - 후보 중 실제로 질문에 답이 되는 내용이 없으면 "관련된 사용상주의사항을
+      찾을 수 없습니다"라고 답하세요. 억지로 가장 비슷해 보이는 문단을 답인
+      것처럼 포장하지 마세요.
 """
 
 TOOLS = [
@@ -261,7 +274,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
-    paragraphs = search_paragraphs(item_seq, field, question, top_k=3)
+    paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
     return {
         "resolved": True,
         "item_name": item_name,
