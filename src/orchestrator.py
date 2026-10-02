@@ -291,6 +291,25 @@ TOOL_DISPATCH = {
 }
 
 
+def warmup():
+    """지연 로딩되는 데이터(의약품 상세정보, DUR, 병용금기 등)를 미리 불러온다.
+
+    drug_lookup/paragraph_search의 데이터는 전부 "처음 쓰일 때 로딩"하는
+    지연 로딩 방식이라, 아무 준비 없이 서비스를 띄우면 그 로딩 비용(실측
+    27초 수준)을 맨 처음 질문한 사용자가 고스란히 떠안는다. 서버/앱을
+    시작할 때(사용자 요청을 받기 전) 이 함수를 한 번 호출해서, 그 비용을
+    "서버 시작 시간"쪽으로 옮긴다 — 서버 시작은 지켜보는 실제 사용자가
+    없지만, 첫 질문에 27초가 걸리는 건 사용자가 직접 겪는 문제이기 때문.
+    """
+    from drug_lookup import _ensure_loaded as _ensure_drug_lookup_loaded
+    from paragraph_search import _ensure_detail_loaded as _ensure_paragraph_detail_loaded
+    from name_match import _load_index as _ensure_name_index_loaded
+
+    _ensure_drug_lookup_loaded()
+    _ensure_paragraph_detail_loaded()
+    _ensure_name_index_loaded()
+
+
 class Conversation:
     """대화 기록을 유지하는 멀티턴 세션.
 
