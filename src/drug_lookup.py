@@ -304,10 +304,26 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     confident=False면 특정 제품으로 단정하지 말고 재확인을 요청해야 한다.
     """
     _ensure_loaded()
-    candidates = search_product(query, top_k=top_k)
+    # 이 함수는 의약품 조회 전용이다. 건강기능식품 후보가 섞이면 "성분 정보 없음"
+    # 계열 목록이 되어 엉뚱한 제품을 되묻게 되므로 제외하고, 같은 이름의 중복도 제거한다.
+    # 건강기능식품이 점수를 독점하는 경우(예: "쏘메토", "어린이 타이레놀")가 있어서,
+    # 필터 전에 넓게 뽑고 의약품만 골라낸다.
+    candidates = [c for c in search_product(query, top_k=300) if c["source"] == "의약품"][:top_k]
+    seen_names: set[str] = set()
+    deduped = []
+    for c in candidates:
+        if c["item_name"] in seen_names:
+            continue
+        seen_names.add(c["item_name"])
+        deduped.append(c)
+    candidates = deduped
 
     if not candidates:
-        return {"candidates": [], "confident": False, "overlap_ratio": 0.0, "candidate_groups": []}
+        return {
+            "candidates": [], "confident": False, "overlap_ratio": 0.0, "candidate_groups": [],
+            "clarification_question": f"'{query}'에 해당하는 등록 의약품을 찾을 수 없습니다. "
+                                      "제품명을 다시 확인해 주세요.",
+        }
 
     ingr_sets = [set(_ingredients_by_seq.get(c["item_seq"], [])) for c in candidates]
     top_ingr = ingr_sets[0]

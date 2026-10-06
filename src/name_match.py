@@ -62,6 +62,16 @@ def find_candidates(query: str, top_k: int = 5, min_score: float = 60.0):
         query, _NORMALIZED_NAMES, scorer=fuzz.WRatio, limit=top_k * 3,
     )
 
+    # 줄임말 입력("쏘메토" -> "쏘메토320밀리그램연질캡슐")은 긴 정식 이름과 문자열 유사도가
+    # 낮아서 무관한 짧은 이름들에 밀린다. 입력으로 시작하는 정식 이름은 최소 85점으로 올린다.
+    if len(query) >= 2:
+        best = {idx: score for _n, score, idx in results}
+        for idx, name in enumerate(_NORMALIZED_NAMES):
+            if name.startswith(query):
+                best[idx] = max(best.get(idx, 0.0), 85.0)
+        results = sorted(((n, s, i) for i, s in best.items() for n in [_NORMALIZED_NAMES[i]]),
+                         key=lambda r: -r[1])
+
     seen = set()
     picked = []
     for _normalized_name, score, idx in results:
