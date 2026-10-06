@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from emergency_detect import detect_emergency
-from drug_lookup import check_multiple_drugs, search_product_with_confidence, get_product_detail
+from drug_lookup import check_multiple_drugs, search_product_with_confidence, get_product_detail, _get_detail
+from text_extract import doc_xml_to_text
 from symptom_search import search_by_symptom
 from paragraph_search import search_paragraphs
 
@@ -322,6 +323,12 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
     - 후보 중 실제로 질문에 답이 되는 내용이 없으면 "관련된 사용상주의사항을
       찾을 수 없습니다"라고 답하세요. 억지로 가장 비슷해 보이는 문단을 답인
       것처럼 포장하지 마세요.
+13. check_drug_interactions 결과에 same_product_repeated가 true이면, 사용자가
+    같은 제품을 여러 번 말한 것입니다. 이는 병용 문제가 아니므로 "병용", "함께
+    복용 시 주의" 같은 표현을 쓰지 마세요. 대신 "같은 제품을 중복해서 드시는
+    것이므로 과다복용에 주의해야 합니다"라고 안내하고, usage_info의 용법용량 원문과
+    과량투여 관련 원문을 그대로 전달하세요(몇 시간 간격인지, 성인·소아 기준 몇 정인지
+    등). 원문에 없는 내용은 지어내지 마세요.
 """
 
 TOOLS = [
@@ -428,6 +435,38 @@ TOOLS = [
 
 def _tool_check_drug_interactions(product_names):
     result = check_multiple_drugs(product_names)
+
+    unresolved = result.get("unresolved_queries") or []
+    if unresolved:
+        # 제품을 먼저 특정해야 비교할 수 있으므로, 비교·경고 필드는 아예 싣지 않는다.
+        return {
+            "unresolved_queries": unresolved,
+            "clarification_questions": [
+                r["clarification_question"] for r in result["resolved_drugs"]
+                if r.get("clarification_question")
+            ],
+            "note": "제품이 특정되지 않아 병용 여부를 비교할 수 없습니다. "
+                    "clarification_questions를 그대로 전달해 제품부터 특정해 달라고 요청하세요.",
+        }
+
+    item_seqs = {r["item_seq"] for r in result["resolved_drugs"] if r.get("item_seq")}
+    if len(item_seqs) == 1:
+        # 같은 제품을 여러 번 말한 경우: 병용이 아니라 과다복용 문제이므로 용법·용량 원문을 준다.
+        seq = next(iter(item_seqs))
+        detail = get_product_detail(seq)
+        # 과량 문구는 e약은요 요약이 아니라 원본 NB 문서에만 있으므로 원본을 본다.
+        raw_caution = doc_xml_to_text(_get_detail(seq).get("NB_DOC_DATA"))
+        overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+        return {
+            "same_product_repeated": True,
+            "item_name": detail.get("item_name"),
+            "usage_info": {
+                "용법용량": detail.get("용법용량"),
+                "과량투여_관련_사용상주의사항": overdose_sentences,
+            },
+            "data_source": "의약품 제품허가정보 기준",
+        }
+
     result["data_source"] = "의약품안전사용서비스 기준"
     result["symptom_safety_note"] = (
         "이 약들을 함께 복용한 후 평소와 다른 증상(어지러움, 메스꺼움, 두드러기, "
