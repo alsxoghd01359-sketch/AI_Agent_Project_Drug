@@ -21,6 +21,7 @@ load_dotenv()
 
 _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 CHAT_MODEL = "gpt-4o-mini"
+_OVERDOSE_KEYWORDS = ("과다", "과량", "한꺼번에")
 
 # 채점용 진단 정보(검색 적중률/근거 표시 정확도/무응답 처리 참고 자료)를 답변 끝에
 # 덧붙일지 여부. .env의 SCORE_DEBUG=true/false로 켜고 끈다(코드 수정 없이 토글).
@@ -434,6 +435,19 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_overdose_info",
+            "description": "제품명으로 과다복용·과량 투여 관련 사용상주의사항 원문을 조회한다. "
+                            "사용자가 과다복용, 과량, 한꺼번에 많이 먹은 경우의 결과를 물을 때 사용한다.",
+            "parameters": {
+                "type": "object",
+                "properties": {"product_name": {"type": "string", "description": "조회할 제품명"}},
+                "required": ["product_name"],
+            },
+        },
+    },
 ]
 
 
@@ -543,11 +557,33 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     }
 
 
+def _tool_get_overdose_info(product_name):
+    result = search_product_with_confidence(product_name)
+    if not result["confident"]:
+        return {
+            "resolved": False,
+            "clarification_question": result.get("clarification_question"),
+            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장을 "
+                    "그대로 답변에 포함해 사용자에게 되물으세요.",
+        }
+    item_seq = result["candidates"][0]["item_seq"]
+    item_name = result["candidates"][0]["item_name"]
+    raw_caution = doc_xml_to_text(_get_detail(item_seq).get("NB_DOC_DATA"))
+    overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+    return {
+        "resolved": True,
+        "item_name": item_name,
+        "과량투여_관련_사용상주의사항": overdose_sentences,
+        "data_source": "의약품 제품허가정보 기준",
+    }
+
+
 TOOL_DISPATCH = {
     "check_drug_interactions": _tool_check_drug_interactions,
     "get_drug_info": _tool_get_drug_info,
     "search_by_symptom": _tool_search_by_symptom,
     "ask_lifestyle_question": _tool_ask_lifestyle_question,
+    "get_overdose_info": _tool_get_overdose_info,
 }
 
 
@@ -591,11 +627,19 @@ class Conversation:
         last_tool_name = None
         last_tool_result = None
 
+        overdose_intent = any(k in user_message for k in _OVERDOSE_KEYWORDS)
+        overdose_forced = False
+
         for _ in range(max_tool_rounds):
+            tool_choice = "auto"
+            if overdose_intent and not overdose_forced:
+                tool_choice = {"type": "function", "function": {"name": "get_overdose_info"}}
+                overdose_forced = True
             response = _client.chat.completions.create(
                 model=CHAT_MODEL,
                 messages=self.messages,
                 tools=TOOLS,
+                tool_choice=tool_choice,
                 temperature=0,
             )
             msg = response.choices[0].message
@@ -614,6 +658,11 @@ class Conversation:
             for tool_call in msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments)
+                if fn_name == "check_drug_interactions" and len(fn_args.get("product_names", [])) < 2:
+                    # 병용 확인은 제품이 2개 이상일 때만 의미가 있다. 1개뿐이면 질병·조건에 대한
+                    # 질문이므로 생활질문 도구로 바꿔서 원래 질문 전체를 넘긴다.
+                    fn_name = "ask_lifestyle_question"
+                    fn_args = {"product_name": fn_args["product_names"][0], "question": user_message}
                 fn = TOOL_DISPATCH.get(fn_name)
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
                 if fn_name == "ask_lifestyle_question":
