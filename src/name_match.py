@@ -14,6 +14,7 @@ DATA_DIR = Path("data")
 
 _NAME_INDEX = None  # [(item_seq, item_name, source)], 지연 로딩
 _NORMALIZED_NAMES = None  # _NAME_INDEX와 같은 순서의 단위 정규화된 이름
+_CLEAN_NAMES = None  # 숫자·기호를 뺀 이름(포함 여부 비교용)
 
 
 def normalize_units(text: str) -> str:
@@ -28,6 +29,10 @@ def normalize_units(text: str) -> str:
     text = re.sub(r"(\d)\s*%", r"\1퍼센트", text)
     text = text.replace("그람", "그램")  # "밀리그람"/"마이크로그람"도 이 한 줄로 같이 통일됨
     return text
+
+
+def _clean_for_contains(text: str) -> str:
+    return re.sub(r"[^가-힣a-zA-Z]", "", text)
 
 
 def _load_index():
@@ -49,13 +54,16 @@ def _load_index():
                 index.append((rec.get("STTEMNT_NO"), name, "건강기능식품"))
 
     _NAME_INDEX = index
+    global _CLEAN_NAMES
     _NORMALIZED_NAMES = [normalize_units(name or "") for _, name, _ in index]
+    _CLEAN_NAMES = [_clean_for_contains(name or "") for _, name, _ in index]
     return index
 
 
 def find_candidates(query: str, top_k: int = 5, min_score: float = 60.0):
     """query와 이름이 비슷한 제품 후보를 [(item_seq, item_name, source, score), ...]로 반환."""
     index = _load_index()
+    raw_query = query
     query = normalize_units(query)
 
     results = process.extract(
@@ -64,10 +72,11 @@ def find_candidates(query: str, top_k: int = 5, min_score: float = 60.0):
 
     # 줄임말 입력("쏘메토" -> "쏘메토320밀리그램연질캡슐")은 긴 정식 이름과 문자열 유사도가
     # 낮아서 무관한 짧은 이름들에 밀린다. 입력으로 시작하는 정식 이름은 최소 85점으로 올린다.
-    if len(query) >= 2:
+    clean_query = _clean_for_contains(raw_query)
+    if len(clean_query) >= 2:
         best = {idx: score for _n, score, idx in results}
-        for idx, name in enumerate(_NORMALIZED_NAMES):
-            if name.startswith(query):
+        for idx, clean_name in enumerate(_CLEAN_NAMES):
+            if clean_name.startswith(clean_query) or clean_query in clean_name:
                 best[idx] = max(best.get(idx, 0.0), 85.0)
         results = sorted(((n, s, i) for i, s in best.items() for n in [_NORMALIZED_NAMES[i]]),
                          key=lambda r: -r[1])

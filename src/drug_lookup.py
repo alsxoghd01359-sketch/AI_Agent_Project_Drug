@@ -16,6 +16,13 @@ from symptom_search import _normalize_ingredient
 
 _BRACKET_RE = re.compile(r"[\(\[][^)\]]*[\)\]]")
 
+# 제품명이 아니라 계열을 가리키는 말의 대표 성분 안내용 고정 목록(데이터 기반 아님, 일반 약학 지식).
+# 제품 특정 질문에 덧붙이는 용도로만 쓴다.
+CLASS_TERM_INGREDIENTS = {
+    "해열제": ["아세트아미노펜", "이부프로펜"],
+    "진통제": ["아세트아미노펜", "이부프로펜", "나프록센"],
+}
+
 
 def _strip_brackets(name: str) -> str:
     return _BRACKET_RE.sub("", name or "").strip()
@@ -319,10 +326,17 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
     candidates = deduped
 
     if not candidates:
+        class_name = next((k for k in CLASS_TERM_INGREDIENTS if k in query), None)
+        if class_name:
+            # 제품명이 아니라 계열을 가리키는 말이면, 계열의 대표 성분을 함께 안내한다.
+            ingredients = ", ".join(CLASS_TERM_INGREDIENTS[class_name])
+            question = (f"'{class_name}'는 제품명이 아니라 성분 계열입니다. 대표 성분으로는 {ingredients} 등이 있습니다. "
+                        "드시는 제품명(또는 성분과 함량)을 알려주시면 해당 제품 기준으로 확인해 드리겠습니다.")
+        else:
+            question = f"'{query}'에 해당하는 등록 의약품을 찾을 수 없습니다. 제품명을 다시 확인해 주세요."
         return {
             "candidates": [], "confident": False, "overlap_ratio": 0.0, "candidate_groups": [],
-            "clarification_question": f"'{query}'에 해당하는 등록 의약품을 찾을 수 없습니다. "
-                                      "제품명을 다시 확인해 주세요.",
+            "clarification_question": question,
         }
 
     ingr_sets = [set(_ingredients_by_seq.get(c["item_seq"], [])) for c in candidates]
