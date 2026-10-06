@@ -16,6 +16,7 @@ from drug_lookup import check_multiple_drugs, search_product_with_confidence, ge
 from text_extract import doc_xml_to_text
 from symptom_search import search_by_symptom
 from paragraph_search import search_paragraphs
+from multi_condition import extract_conditions, search_by_conditions
 
 load_dotenv()
 
@@ -548,7 +549,11 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
-    paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
+    conditions = extract_conditions(question, CHAT_MODEL)
+    if len(conditions) >= 2:
+        paragraphs = search_by_conditions(item_seq, field, conditions, top_k=8)
+    else:
+        paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
     return {
         "resolved": True,
         "item_name": item_name,
@@ -663,6 +668,11 @@ class Conversation:
                     # 질문이므로 생활질문 도구로 바꿔서 원래 질문 전체를 넘긴다.
                     fn_name = "ask_lifestyle_question"
                     fn_args = {"product_name": fn_args["product_names"][0], "question": user_message}
+                if fn_name == "get_drug_info" and len(extract_conditions(user_message, CHAT_MODEL)) >= 2:
+                    # 조건이 두 개 이상이면 DUR 전문 조회로는 조건별 근거를 보장할 수 없다.
+                    # 생활질문 경로에서 조건마다 따로 검색한다.
+                    fn_name = "ask_lifestyle_question"
+                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
                 fn = TOOL_DISPATCH.get(fn_name)
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
                 if fn_name == "ask_lifestyle_question":
