@@ -16,7 +16,7 @@ from drug_lookup import check_multiple_drugs, search_product_with_confidence, ge
 from text_extract import doc_xml_to_text
 from symptom_search import search_by_symptom
 from paragraph_search import search_paragraphs, _get_paragraphs
-from multi_condition import extract_conditions, search_by_conditions
+from multi_condition import extract_conditions
 from name_kind import classify_names
 
 load_dotenv()
@@ -481,10 +481,10 @@ def _tool_check_drug_interactions(product_names):
         # 과량 문구는 e약은요 요약이 아니라 원본 NB 문서에만 있으므로 원본을 본다.
         raw_caution = doc_xml_to_text(_get_detail(seq).get("NB_DOC_DATA"))
         overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
-        usage = " ".join((detail.get("용법용량") or "").split())
         facts = "\n".join(
-            [f"- (용법용량) {usage}"] + [_plain_bullets(overdose_sentences, "과량투여")]
-        ) if overdose_sentences else f"- (용법용량) {usage}"
+            _split_field("용법용량", detail.get("용법용량") or "")
+            + ([_plain_bullets(overdose_sentences, "과량투여")] if overdose_sentences else [])
+        )
         summary = "같은 제품을 중복해서 드시는 것이므로, 병용이 아니라 과다복용에 주의해야 합니다."
         return {
             "same_product_repeated": True,
@@ -533,12 +533,8 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
         )
     if detail.get("ingredients"):
         basic.append(f"- (성분) {', '.join(detail['ingredients'])}")
-    efcy = " ".join((detail.get("효능효과") or "").split())
-    if efcy:
-        basic.append(f"- (효능효과) {efcy}")
-    usage = " ".join((detail.get("용법용량") or "").split())
-    if usage:
-        basic.append(f"- (용법용량) {usage}")
+    basic += _split_field("효능효과", detail.get("효능효과") or "")
+    basic += _split_field("용법용량", detail.get("용법용량") or "")
 
     paragraphs = search_paragraphs(item_seq, "NB", question or detail.get("item_name") or "", top_k=5)
     caution_md = _bullets_to_md(_render_bullets([p["text"] for p in paragraphs])) if paragraphs else ""
@@ -608,18 +604,17 @@ def _tool_get_age_dur_info(product_name, question):
     if not entries:
         # 연령 DUR 항목이 없으면 사용상주의사항 원문에서 질문과 관련된 문단을 찾는다.
         return _tool_ask_lifestyle_question(product_name, question)
-    parts = [
-        f"{d['type']}: {d['content']}" if d.get("content")
-        else f"{d['type']}: 해당 유형으로 등록되어 있으나 구체적인 문구는 없습니다."
+    facts = "\n".join(
+        f"- (DUR: {d['type']}) " + (
+            d.get("content") or f"{d['type']}에 대한 주의가 필요한 성분/품목으로 등록되어 있으나 구체적인 문구는 없습니다."
+        )
         for d in entries
-    ]
+    )
     return {
         "resolved": True,
         "item_name": detail["item_name"],
-        "age_answer": f"{detail['item_name']}의 의약품안전사용서비스 DUR 정보에는 다음과 같이 등록되어 있습니다. " + " ".join(parts),
-        "note": "age_answer 문장을 그대로 답변으로 출력하세요. 다른 설명을 덧붙이거나 말투를 바꾸지 마세요. "
-                "'먹어도 된다', '안전하다' 같은 결론은 쓰지 마세요. 마지막 줄에 약사 상담을 권하세요.",
-        "data_source": detail["data_source"],
+        "answer": _assemble_answer(facts, None, detail["data_source"]),
+        "note": _ANSWER_NOTE,
     }
 
 
@@ -635,31 +630,6 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     if results is None:
         return {"error": f"'{symptom}'은 지원하지 않는 증상 분류입니다."}
     return {"candidates": results, "data_source": "의약품 제품허가정보 기준"}
-
-
-_DIRECT_FILTER_PROMPT = """사용자 질문: "{question}"
-
-아래 문단 중에서 이 질문에 직접 답이 되는 문단의 번호만 쉼표로 적으세요.
-질문의 대상(음식, 음료, 행동 등)을 다른 것으로 바꿔 해석한 문단, 질문과 단어만 비슷한 문단은 제외합니다.
-직접 답이 되는 문단이 없으면 "없음"이라고만 답하세요.
-
-[문단]
-{paragraphs}
-"""
-
-
-def _filter_direct(question, paragraphs):
-    """리랭킹이 남긴 문단 중 질문에 직접 답하는 것만 남긴다. 이 확인에서 떨어지면 근거 없음으로 본다."""
-    if not paragraphs:
-        return []
-    text = "\n".join(f"{i + 1}. {p['text']}" for i, p in enumerate(paragraphs))
-    resp = _client.chat.completions.create(
-        model=CHAT_MODEL,
-        temperature=0,
-        messages=[{"role": "user", "content": _DIRECT_FILTER_PROMPT.format(question=question, paragraphs=text)}],
-    )
-    numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
-    return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
 
 
 _FOOD_EVIDENCE_PROMPT = """음식 또는 음료: "{term}"
@@ -736,6 +706,23 @@ def _pick_for_condition(condition, paragraphs):
     )
     numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
     return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
+
+
+def _pick_with_food_check(condition, raw):
+    """조건에 맞는 문단을 고르고, 음식·음료 조건이면 고른 문단이 실제로 그 음식을
+    다루는지 다시 확인한다. _pick_for_condition이 음식과 무관한 문단(예: "고추"
+    조건에 음주 관련 문단)을 잘못 고르는 경우가 재현됐는데, 한 번 음식 근거
+    판정을 통과하지 못하면 걸러낼 길이 없었다(이전에는 마지막 LLM 응답 단계에서
+    가끔 걸러졌지만, 그 단계를 없앤 뒤로는 그대로 새어 나갔다)."""
+    picked = _pick_for_condition(condition, raw)
+    term = _food_term(condition)
+    if term:
+        if picked:
+            if _food_evidence_missing(term, picked[:3]):
+                picked = []
+        elif raw and not _food_evidence_missing(term, raw[:3]):
+            picked = raw[:2]
+    return picked
 
 
 def _attach_body(picked, all_paragraphs):
@@ -842,6 +829,22 @@ def _plain_bullets(sentences, tag):
     return "\n".join(f"- ({tag}) {b['text']}" for b in bullets)
 
 
+def _split_field(tag, text, max_len=80):
+    """효능효과·용법용량처럼 한 필드에 여러 항목이 들어있는 긴 텍스트를 항목별 bullet로
+    나눈다. "1. ...  2. ..."나 "○ ..." 같은 표시가 있으면 그 단위로, 없으면 문장
+    단위로 나눈다. 짧으면(그 자체로 한 항목이면) bullet 하나만 둔다."""
+    text = " ".join((text or "").split())
+    if not text:
+        return []
+    if len(text) <= max_len:
+        return [f"- ({tag}) {text}"]
+    parts = re.split(r"\s*(?=(?:\d+\.\s)|(?:\(\d+\)\s)|(?:○\s))", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) <= 1:
+        parts = [s.strip() for s in re.split(r"(?<=[.다])\s+", text) if s.strip()]
+    return [f"- ({tag}) {p}" for p in parts] if parts else [f"- ({tag}) {text}"]
+
+
 _ANSWER_NOTE = (
     "answer 필드를 글자 하나, 줄바꿈이나 라벨 하나도 바꾸지 말고 그대로 출력하세요. "
     "요약하거나, 라벨을 **굵게**로 바꾸거나, 설명을 더 붙이거나 빼지 마세요. 이게 전체 답변입니다."
@@ -918,14 +921,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         found = []
         for c in conditions:
             raw = search_paragraphs(item_seq, field, c, top_k=8)
-            paras = _pick_for_condition(c, raw)
-            if not paras and raw:
-                # 조건이 음식·음료일 때만 완화해서 top-2를 본다(선별이 너무 엄격했을 수 있으므로).
-                # 음식이 아닌 조건(운전 등)까지 완화하면, 근거가 전혀 없는데도 무관한 문단이
-                # 섞여 들어가 "운전에 대한 언급은 없지만 ..."처럼 엉뚱한 근거를 보여주게 된다.
-                term = _food_term(c)
-                if term and not _food_evidence_missing(term, raw[:3]):
-                    paras = raw[:2]
+            paras = _pick_with_food_check(c, raw)
             paras = _attach_body(paras, _get_paragraphs(item_seq, field))
             if paras:
                 found.extend(paras)
@@ -952,13 +948,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         ud = search_paragraphs(item_seq, "UD", question, top_k=4)
         seen = {p["text"] for p in ud}
         paragraphs = ud + [p for p in paragraphs if p["text"] not in seen]
-    picked = _pick_for_condition(question, paragraphs)
-    if not picked and paragraphs:
-        # 음식·음료 질문일 때만 완화해서 top-2를 본다. 음식이 아닌 질문까지 완화하면
-        # 근거가 전혀 없는데도 무관한 문단이 섞여 들어간다.
-        term = _food_term(question)
-        if term and not _food_evidence_missing(term, paragraphs[:3]):
-            picked = paragraphs[:2]
+    picked = _pick_with_food_check(question, paragraphs)
     picked = _attach_body(picked, _get_paragraphs(item_seq, field))
     if not picked:
         return _no_evidence_result(item_name)
@@ -975,16 +965,15 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
 
 def _no_evidence_result(item_name):
     # 근거가 없으면 LLM이 제각각 말하지 않도록 문장을 코드에서 고정한다.
+    sentence = (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
+                "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
+                "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다.")
     return {
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": [],
-        "no_evidence_answer": (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
-                               "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
-                               "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다."),
-        "note": "no_evidence_answer 문장을 그대로 답변으로 출력하세요. 다른 설명을 덧붙이거나 "
-                "'병용금기가 없다'처럼 바꾸지 마세요.",
-        "data_source": "의약품 제품허가정보 기준",
+        "answer": f"{sentence}\n\n데이터 출처: 의약품 제품허가정보 기준",
+        "note": _ANSWER_NOTE,
     }
 
 
@@ -1142,6 +1131,19 @@ class Conversation:
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 })
+
+            if len(msg.tool_calls) == 1 and isinstance(last_tool_result, dict) and "answer" in last_tool_result:
+                # 도구가 이미 answer를 완성해 줬다. 한 번 더 모델을 불러 "그대로 출력"을
+                # 시키면, 모델이 옮겨 적는 과정에서 줄바꿈이나 라벨이 가끔 흔들렸다.
+                # 모델에게 다시 쓰게 하지 않고 Python이 그 문자열로 바로 끝낸다.
+                content = last_tool_result["answer"]
+                self.messages.append({"role": "assistant", "content": content})
+                if SCORE_DEBUG:
+                    cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
+                    content += _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, content)
+                    grades = _auto_grade(user_message, last_tool_name, last_tool_result, content)
+                    content += _build_grading_block(grades)
+                return content
 
         return "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다."
 
