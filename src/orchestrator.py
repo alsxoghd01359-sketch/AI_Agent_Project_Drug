@@ -916,11 +916,13 @@ def _assemble_answer(facts, summary, data_source, closing=None):
     parts = ["[조회된 사실]", facts]
     if summary:
         parts += ["", "[정리]", summary]
-    parts += ["", "약사나 의사와 상담하시기 바랍니다."]
-    closings = [closing] if isinstance(closing, str) else (closing or [])
+    closings = [c for c in ([closing] if isinstance(closing, str) else (closing or [])) if c]
+    # 전문의약품 안내 자체가 "처방한 의사·약사의 지침을 따르라"는 상담 권유를 이미
+    # 포함하므로, 그때는 일반적인 "약사나 의사와 상담하시기 바랍니다."를 또 붙이지 않는다.
+    if not any("처방 받은 지침을 따르세요" in c for c in closings):
+        parts += ["", "약사나 의사와 상담하시기 바랍니다."]
     for c in closings:
-        if c:
-            parts += ["", c]
+        parts += ["", c]
     parts += ["", f"데이터 출처: {data_source}"]
     return "\n".join(parts)
 
