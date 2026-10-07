@@ -703,6 +703,58 @@ def _age_group(question):
     return None
 
 
+_RENDER_PROMPT = """아래는 질문의 조건마다 찾은 사용상주의사항 문단입니다. 모든 조건에 실제로 문단이 있습니다.
+조건마다 문단의 내용을 이해하기 쉬운 말로 옮기세요. 문단에 없는 내용은 쓰지 마세요.
+결론이나 주의를 말하는 문장(예: 무시해도 좋을 것으로 예상된다, 신중히 투여, 투여하지 말 것, 증강시킬 수 있다)은 문단의 표현을 한 글자도 바꾸지 말고 그대로 옮기세요. 그 밖의 설명만 쉬운 말로 바꿀 수 있습니다.
+어떤 조건이든 "관련 없음", "관련된 주의사항이 없습니다"라고 쓰지 마세요 — 모든 조건에 문단이 주어졌으므로 반드시 내용이 있습니다. 번호나 라벨은 쓰지 마세요.
+
+{blocks}
+"""
+
+_SUMMARY_PROMPT = """아래 조회된 사실만 근거로, 사용자에게 전할 한 문장 요약을 쓰세요.
+- 조회된 사실에 있는 내용만 쓰세요. 다른 지식이나 추측을 더하지 마세요.
+- 짧고 자연스러운 한국어 한 문장으로 쓰세요. 길게 나열하지 마세요.
+- 조건이 여러 개면 조건을 하나도 빠뜨리지 말고 모두 담되, 조건마다 결론은 한 번씩만 쓰세요.
+- 결론의 강도는 조회된 사실 그대로 옮기세요. '안전하다'는 말은 쓰지 마세요.
+- 문장 하나만 출력하세요.
+
+{facts}
+"""
+
+
+def _render_facts(conditions_out):
+    """조건마다 근거가 있는지 없는지는 Python이 이미 안다. LLM에게 다시 판단하게 하면
+    (근거가 있어도) '관련 없음'이라고 잘못 쓰는 경우가 있었으므로, 그 판단은 Python이 하고
+    LLM에게는 근거가 있는 조건의 문단만 보내 옮겨 쓰게 한다."""
+    with_evidence = [c for c in conditions_out if c["evidence"]]
+    rendered = ""
+    if with_evidence:
+        blocks = "\n".join(
+            f"[조건] {c['condition']}\n" + "\n".join(f"- {t}" for t in c["evidence"])
+            for c in with_evidence
+        )
+        resp = _client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0,
+            messages=[{"role": "user", "content": _RENDER_PROMPT.format(blocks=blocks)}],
+        )
+        rendered = (resp.choices[0].message.content or "").strip()
+    no_evidence_lines = [
+        f"'{c['condition']}'과 관련된 주의사항은 없습니다."
+        for c in conditions_out if not c["evidence"]
+    ]
+    return "\n\n".join(p for p in [rendered] + no_evidence_lines if p)
+
+
+def _make_summary(facts):
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(facts=facts)}],
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
 def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     result = search_product_with_confidence(product_name)
     if not result["confident"]:
@@ -734,17 +786,18 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
             })
         if not found:
             return _no_evidence_result(item_name)
+        facts = _render_facts(conditions_out)
+        summary = _make_summary(facts)
         return {
             "resolved": True,
             "item_name": item_name,
+            "facts": facts,
+            "summary": summary,
             "conditions": conditions_out,
             "relevant_paragraphs": found,
-            "note": "다음 형식으로 답하세요. 번호는 붙이지 마세요. [조회된 사실] 섹션을 먼저 쓰고, 이어서 [정리] 섹션을 씁니다. conditions의 조건마다 evidence 문단을 이해하기 쉬운 말로 옮깁니다. "
-                    "evidence가 비어 있는 조건은 '해당 조건과 관련된 주의사항은 없습니다'라고 씁니다. "
-                    "[정리] 섹션: 위 조회된 사실만 바탕으로 한 줄로 요약합니다. 결론은 evidence 문단의 표현을 그대로 가져오세요. "
-                    "예를 들어 문단이 '전혀 없거나 무시해도 좋을 것으로 예상된다'라고 하면 정리에도 그 표현을 쓰고, '큰 영향을 미치지 않을'처럼 강도를 바꾸지 마세요. "
-                    "근거에 없는 결론이나 '안전하다'는 말은 쓰지 마세요. "
-                    "마지막 줄에 약사 상담을 권하세요. evidence에 없는 내용은 어디에도 덧붙이지 마세요.",
+            "note": "답변은 아래 세 부분을 모두 빠짐없이 출력하세요. 1) [조회된 사실] 라벨 아래에 facts를 그대로 씁니다. "
+                    "2) [정리] 라벨 아래에 summary를 그대로 씁니다. summary가 비어 있을 때만 이 부분을 생략합니다. "
+                    "3) 마지막 줄에 '약사나 의사와 상담하시기 바랍니다.'를 붙입니다. 문장을 고치거나 덧붙이지 마세요.",
             "data_source": "의약품 제품허가정보 기준",
         }
 
