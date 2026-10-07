@@ -487,19 +487,28 @@ def _tool_check_drug_interactions(product_names):
             + ([_plain_bullets(overdose_sentences, "과량투여")] if overdose_sentences else [])
         )
         summary = "같은 제품을 중복해서 드시는 것이므로, 병용이 아니라 과다복용에 주의해야 합니다."
+        rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
         return {
             "same_product_repeated": True,
             "item_name": detail.get("item_name"),
-            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
             "note": _ANSWER_NOTE,
         }
 
     # 병용 답변은 병용금기와 성분 중복만 다룬다. 제품별 연령·대상 주의는 병용과 무관하므로 싣지 않는다.
+    rx_drugs = [
+        r["item_name"] for r in result.get("resolved_drugs", [])
+        if r.get("item_seq") and (get_product_detail(r["item_seq"]) or {}).get("spclty_pblc") == "전문의약품"
+    ]
+    rx_closing = (
+        f"{', '.join(rx_drugs)}은 의사의 처방이 필요한 전문의약품입니다. 이 안내는 처방한 의사나 "
+        "약사의 지침을 대신하지 않으니, 복용 여부와 방법은 처방 받은 지침을 따르세요."
+    ) if rx_drugs else None
     for r in result.get("resolved_drugs", []):
         r.pop("dur_cautions", None)
     facts = _interaction_facts(result)
     summary = _interaction_summary(result)
-    result["answer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준")
+    result["answer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준", closing=rx_closing)
     result["note"] = _ANSWER_NOTE
     return result
 
@@ -554,11 +563,15 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
 
     facts = "\n".join(filter(None, ["\n".join(basic), caution_md, "\n".join(dur_lines)])) or "등록된 정보가 없습니다."
     summary = _make_summary(facts)
-    closing = (
-        "이 약은 특정 약과 함께 복용 시 주의가 필요한 조합이 등록되어 있습니다. "
-        "현재 복용 중인 다른 약이 있으면 알려주시면 추가로 확인해드리겠습니다."
-    ) if detail.get("has_interaction_data") else None
-    return _assemble_answer(facts, summary, data_source, closing=closing)
+    closings = []
+    if detail.get("has_interaction_data"):
+        closings.append(
+            "이 약은 특정 약과 함께 복용 시 주의가 필요한 조합이 등록되어 있습니다. "
+            "현재 복용 중인 다른 약이 있으면 알려주시면 추가로 확인해드리겠습니다."
+        )
+    if detail.get("spclty_pblc") == "전문의약품":
+        closings.append(_PRESCRIPTION_NOTE)
+    return _assemble_answer(facts, summary, data_source, closing=closings)
 
 
 def _tool_get_drug_info(product_name, question="", build_answer=True):
@@ -611,10 +624,11 @@ def _tool_get_age_dur_info(product_name, question):
         )
         for d in entries
     )
+    rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
     return {
         "resolved": True,
         "item_name": detail["item_name"],
-        "answer": _assemble_answer(facts, None, detail["data_source"]),
+        "answer": _assemble_answer(facts, None, detail["data_source"], closing=rx_closing),
         "note": _ANSWER_NOTE,
     }
 
@@ -903,10 +917,30 @@ def _assemble_answer(facts, summary, data_source, closing=None):
     if summary:
         parts += ["", "[정리]", summary]
     parts += ["", "약사나 의사와 상담하시기 바랍니다."]
-    if closing:
-        parts += ["", closing]
+    closings = [closing] if isinstance(closing, str) else (closing or [])
+    for c in closings:
+        if c:
+            parts += ["", c]
     parts += ["", f"데이터 출처: {data_source}"]
     return "\n".join(parts)
+
+
+_PRESCRIPTION_NOTE = (
+    "이 약은 의사의 처방이 필요한 전문의약품입니다. 이 안내는 처방한 의사나 약사의 "
+    "지침을 대신하지 않으니, 복용 여부와 방법은 처방 받은 지침을 따르세요."
+)
+
+
+def _prescription_closing(item_seq):
+    """전문의약품이면 처방 지침이 우선이라는 안내를 덧붙인다. 일반의약품이면 None.
+    "먹어도 되나요"는 전문의약품이라면 원래 처방한 의사가 판단할 문제다. 이미 처방받아
+    복용 중인 환자가 상호작용 등을 확인하는 건 정당한 용도이므로 답변 자체를 거부하지는
+    않지만, 이 안내가 처방을 대신하지 않는다는 것을 매번 분명히 한다."""
+    detail = get_product_detail(item_seq)
+    if detail and detail.get("spclty_pblc") == "전문의약품":
+        return _PRESCRIPTION_NOTE
+    return None
+
 
 _SUMMARY_PROMPT = """아래 조회된 사실을 한 문장으로 짧게 정리하세요. 이것은 요약이지, 다시 말하는 것이 아닙니다.
 - 조건마다 가장 중요한 결론 하나만 고르세요. 한 조건에 여러 주의사항이 있어도 전부 나열하지 말고 제일 중요한 것 하나만 쓰세요.
@@ -957,6 +991,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
+    rx_closing = _prescription_closing(item_seq)
     conditions = extract_conditions(question, CHAT_MODEL)
     if len(conditions) >= 2:
         # 조건마다 따로 근거를 판정한다. 근거가 없는 조건은 그 조건만 없다고 말한다.
@@ -973,13 +1008,13 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
                 "evidence": [p["text"] for p in paras],
             })
         if not found:
-            return _no_evidence_result(item_name)
+            return _no_evidence_result(item_name, closing=rx_closing)
         facts = _render_facts(conditions_out)
         summary = _make_summary(facts)
         return {
             "resolved": True,
             "item_name": item_name,
-            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
             "conditions": conditions_out,
             "relevant_paragraphs": found,
             "note": _ANSWER_NOTE,
@@ -994,28 +1029,29 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     picked = _pick_with_food_check(question, paragraphs)
     picked = _attach_body(picked, _get_paragraphs(item_seq, field))
     if not picked:
-        return _no_evidence_result(item_name)
+        return _no_evidence_result(item_name, closing=rx_closing)
     facts = _bullets_to_md(_render_bullets([p["text"] for p in picked]))
     summary = _make_summary(facts)
     return {
         "resolved": True,
         "item_name": item_name,
-        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
         "relevant_paragraphs": picked,
         "note": _ANSWER_NOTE,
     }
 
 
-def _no_evidence_result(item_name):
+def _no_evidence_result(item_name, closing=None):
     # 근거가 없으면 LLM이 제각각 말하지 않도록 문장을 코드에서 고정한다.
     sentence = (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
                 "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
                 "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다.")
+    parts = [sentence] + ([closing] if closing else []) + ["데이터 출처: 의약품 제품허가정보 기준"]
     return {
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": [],
-        "answer": f"{sentence}\n\n데이터 출처: 의약품 제품허가정보 기준",
+        "answer": "\n\n".join(parts),
         "note": _ANSWER_NOTE,
     }
 
@@ -1031,16 +1067,17 @@ def _tool_get_overdose_info(product_name):
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
+    rx_closing = _prescription_closing(item_seq)
     raw_caution = doc_xml_to_text(_get_detail(item_seq).get("NB_DOC_DATA"))
     overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
     if not overdose_sentences:
-        return _no_evidence_result(item_name)
+        return _no_evidence_result(item_name, closing=rx_closing)
     facts = _plain_bullets(overdose_sentences, "과량투여")
     summary = _make_summary(facts)
     return {
         "resolved": True,
         "item_name": item_name,
-        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
         "note": _ANSWER_NOTE,
     }
 
