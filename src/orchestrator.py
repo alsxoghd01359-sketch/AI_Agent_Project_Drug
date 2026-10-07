@@ -913,16 +913,21 @@ def _assemble_answer(facts, summary, data_source, closing=None):
     조립을 맡기면, 라벨을 **굵게**로 바꾸거나 문단을 빠뜨리거나 근거에 없는 결론("운전은
     가능하다" 등)을 덧붙이는 경우가 있었다. 조립까지 끝낸 문자열 하나를 그대로 출력하게
     하면 이런 흔들림이 없다."""
-    parts = ["[조회된 사실]", facts]
-    if summary:
-        parts += ["", "[정리]", summary]
     closings = [c for c in ([closing] if isinstance(closing, str) else (closing or [])) if c]
     # 전문의약품 안내 자체가 "처방한 의사·약사의 지침을 따르라"는 상담 권유를 이미
     # 포함하므로, 그때는 일반적인 "약사나 의사와 상담하시기 바랍니다."를 또 붙이지 않는다.
-    if not any("처방 받은 지침을 따르세요" in c for c in closings):
-        parts += ["", "약사나 의사와 상담하시기 바랍니다."]
-    for c in closings:
-        parts += ["", c]
+    tail = [] if any("처방 받은 지침을 따르세요" in c for c in closings) else ["약사나 의사와 상담하시기 바랍니다."]
+    tail += closings
+    tail_text = " ".join(tail)
+
+    # [조회된 사실]의 bullet은 항목별로 분리된 근거라 그대로 두지만, 그 아래 정리·
+    # 상담 권유·안내 문구는 전부 결론에 해당하는 말이라 blank line으로 뚝뚝 끊어
+    # 보여주지 않고 한 문단으로 자연스럽게 이어 쓴다.
+    parts = ["[조회된 사실]", facts, ""]
+    if summary:
+        parts += ["[정리]", f"{summary} {tail_text}".strip()]
+    else:
+        parts.append(tail_text)
     parts += ["", f"데이터 출처: {data_source}"]
     return "\n".join(parts)
 
@@ -1048,12 +1053,12 @@ def _no_evidence_result(item_name, closing=None):
     sentence = (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
                 "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
                 "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다.")
-    parts = [sentence] + ([closing] if closing else []) + ["데이터 출처: 의약품 제품허가정보 기준"]
+    text = f"{sentence} {closing}".strip() if closing else sentence
     return {
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": [],
-        "answer": "\n\n".join(parts),
+        "answer": f"{text}\n\n데이터 출처: 의약품 제품허가정보 기준",
         "note": _ANSWER_NOTE,
     }
 
