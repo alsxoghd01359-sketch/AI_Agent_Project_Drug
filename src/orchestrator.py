@@ -612,8 +612,8 @@ _FOOD_TARGET_PROMPT = """사용자 질문: "{question}"
 """
 
 
-def _food_target_missing(question, paragraphs):
-    """질문의 음식·음료가 근거 문단에 한 번도 나오지 않으면 True. 음식이 아니면 판단하지 않고 False."""
+def _food_term(question):
+    """질문에서 음식·음료 이름을 하나 뽑는다. 음식·음료가 아니면 None."""
     resp = _client.chat.completions.create(
         model=CHAT_MODEL,
         temperature=0,
@@ -621,9 +621,14 @@ def _food_target_missing(question, paragraphs):
     )
     term = (resp.choices[0].message.content or "").strip().strip("\"'")
     if not term or term == "없음":
-        return False
+        return None
     if classify_names([term], CHAT_MODEL).get(term) != "food":
-        return False
+        return None
+    return term
+
+
+def _food_evidence_missing(term, paragraphs):
+    """근거 문단에 음식·음료 term을 직접 다루는 내용이 없으면 True."""
     text = "\n".join(f"- {p['text']}" for p in paragraphs)
     check = _client.chat.completions.create(
         model=CHAT_MODEL,
@@ -631,6 +636,14 @@ def _food_target_missing(question, paragraphs):
         messages=[{"role": "user", "content": _FOOD_EVIDENCE_PROMPT.format(term=term, paragraphs=text)}],
     )
     return not (check.choices[0].message.content or "").strip().upper().startswith("YES")
+
+
+def _food_target_missing(question, paragraphs):
+    """질문의 음식·음료가 근거 문단에 한 번도 나오지 않으면 True. 음식이 아니면 판단하지 않고 False."""
+    term = _food_term(question)
+    if term is None:
+        return False
+    return _food_evidence_missing(term, paragraphs)
 
 
 _CONDITION_PICK_PROMPT = """복용자 상황: "{condition}"
@@ -703,47 +716,46 @@ def _age_group(question):
     return None
 
 
-_RENDER_PROMPT = """아래는 질문의 조건마다 찾은 사용상주의사항 문단입니다. 모든 조건에 실제로 문단이 있습니다.
-조건마다 문단의 내용을 이해하기 쉬운 말로 옮기세요. 문단에 없는 내용은 쓰지 마세요.
+_RENDER_PROMPT = """아래 문단은 한 가지 조건에 대한 사용상주의사항입니다.
+문단의 내용을 이해하기 쉬운 말로 옮기세요. 문단에 없는 내용은 쓰지 마세요.
 결론이나 주의를 말하는 문장(예: 무시해도 좋을 것으로 예상된다, 신중히 투여, 투여하지 말 것, 증강시킬 수 있다)은 문단의 표현을 한 글자도 바꾸지 말고 그대로 옮기세요. 그 밖의 설명만 쉬운 말로 바꿀 수 있습니다.
-어떤 조건이든 "관련 없음", "관련된 주의사항이 없습니다"라고 쓰지 마세요 — 모든 조건에 문단이 주어졌으므로 반드시 내용이 있습니다. 번호나 라벨은 쓰지 마세요.
+번호나 라벨은 쓰지 마세요.
 
 {blocks}
 """
 
-_SUMMARY_PROMPT = """아래 조회된 사실만 근거로, 사용자에게 전할 한 문장 요약을 쓰세요.
-- 조회된 사실에 있는 내용만 쓰세요. 다른 지식이나 추측을 더하지 마세요.
-- 짧고 자연스러운 한국어 한 문장으로 쓰세요. 길게 나열하지 마세요.
-- 조건이 여러 개면 조건을 하나도 빠뜨리지 말고 모두 담되, 조건마다 결론은 한 번씩만 쓰세요.
+_SUMMARY_PROMPT = """아래 조회된 사실을 한 문장으로 짧게 정리하세요. 이것은 요약이지, 다시 말하는 것이 아닙니다.
+- 조건마다 가장 중요한 결론 하나만 고르세요. 한 조건에 여러 주의사항이 있어도 전부 나열하지 말고 제일 중요한 것 하나만 쓰세요.
+- 수치, 예외 상황, 부연 설명, 세부 조건은 빼세요.
+- 조회된 사실에 있는 내용만 쓰세요. 추측이나 새 정보를 더하지 마세요.
+- 조건이 여러 개면 조건마다 고른 결론을 이어 쓰되, 전체를 한 문장, 50자 안팎으로 짧게 끝내세요.
+- 근거가 없다고 나온 조건은 정리에서 굳이 다시 언급하지 않아도 됩니다.
 - 결론의 강도는 조회된 사실 그대로 옮기세요. '안전하다'는 말은 쓰지 마세요.
-- 문장 하나만 출력하세요.
 
 {facts}
 """
 
 
 def _render_facts(conditions_out):
-    """조건마다 근거가 있는지 없는지는 Python이 이미 안다. LLM에게 다시 판단하게 하면
-    (근거가 있어도) '관련 없음'이라고 잘못 쓰는 경우가 있었으므로, 그 판단은 Python이 하고
-    LLM에게는 근거가 있는 조건의 문단만 보내 옮겨 쓰게 한다."""
-    with_evidence = [c for c in conditions_out if c["evidence"]]
-    rendered = ""
-    if with_evidence:
-        blocks = "\n".join(
-            f"[조건] {c['condition']}\n" + "\n".join(f"- {t}" for t in c["evidence"])
-            for c in with_evidence
-        )
+    """조건마다 따로 LLM에게 옮겨 쓰게 하고, Python이 조건 제목을 붙여 조립한다.
+    근거가 있는지 없는지는 Python이 이미 알고 있으므로 그 판단은 LLM에게 다시 맡기지 않는다
+    (맡기면 근거가 있어도 '관련 없음'이라고 잘못 쓰는 경우가 있었다). 조건마다 따로 조립하면
+    가독성을 위해 조건 제목을 항상 붙일 수 있고, 한 조건의 문단이 다른 조건의 설명에 섞여
+    들어가지 않는다."""
+    parts = []
+    for c in conditions_out:
+        if not c["evidence"]:
+            parts.append(f"**{c['condition']}**\n이 조건과 관련된 주의사항은 없습니다.")
+            continue
+        blocks = "\n".join(f"- {t}" for t in c["evidence"])
         resp = _client.chat.completions.create(
             model=CHAT_MODEL,
             temperature=0,
             messages=[{"role": "user", "content": _RENDER_PROMPT.format(blocks=blocks)}],
         )
         rendered = (resp.choices[0].message.content or "").strip()
-    no_evidence_lines = [
-        f"'{c['condition']}'과 관련된 주의사항은 없습니다."
-        for c in conditions_out if not c["evidence"]
-    ]
-    return "\n\n".join(p for p in [rendered] + no_evidence_lines if p)
+        parts.append(f"**{c['condition']}**\n{rendered}")
+    return "\n\n".join(parts)
 
 
 def _make_summary(facts):
@@ -775,8 +787,13 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         for c in conditions:
             raw = search_paragraphs(item_seq, field, c, top_k=8)
             paras = _pick_for_condition(c, raw)
-            if not paras and raw and not _food_target_missing(c, raw[:3]):
-                paras = raw[:2]
+            if not paras and raw:
+                # 조건이 음식·음료일 때만 완화해서 top-2를 본다(선별이 너무 엄격했을 수 있으므로).
+                # 음식이 아닌 조건(운전 등)까지 완화하면, 근거가 전혀 없는데도 무관한 문단이
+                # 섞여 들어가 "운전에 대한 언급은 없지만 ..."처럼 엉뚱한 근거를 보여주게 된다.
+                term = _food_term(c)
+                if term and not _food_evidence_missing(term, raw[:3]):
+                    paras = raw[:2]
             paras = _attach_body(paras, _get_paragraphs(item_seq, field))
             if paras:
                 found.extend(paras)
@@ -795,7 +812,8 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
             "summary": summary,
             "conditions": conditions_out,
             "relevant_paragraphs": found,
-            "note": "답변은 아래 세 부분을 모두 빠짐없이 출력하세요. 1) [조회된 사실] 라벨 아래에 facts를 그대로 씁니다. "
+            "note": "답변은 아래 세 부분을 모두 빠짐없이 출력하세요. 1) [조회된 사실] 라벨 아래에 facts를 글자 하나, 줄바꿈 하나도 바꾸지 말고 그대로 씁니다. "
+                    "facts의 조건 제목(**조건**)과 조건 사이 빈 줄은 그대로 유지하세요 — 이게 가독성을 위한 구조입니다. "
                     "2) [정리] 라벨 아래에 summary를 그대로 씁니다. summary가 비어 있을 때만 이 부분을 생략합니다. "
                     "3) 마지막 줄에 '약사나 의사와 상담하시기 바랍니다.'를 붙입니다. 문장을 고치거나 덧붙이지 마세요.",
             "data_source": "의약품 제품허가정보 기준",
