@@ -234,10 +234,13 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    경우(5, 6, 7-(3)번 규칙에 해당하는 경우)에는 이 3단계 구조와 8번의 데이터 출처
    표기를 쓰지 마세요. 아직 아무 데이터도 조회해서 알려준 게 없는데 주의사항이나
    상담 권유를 붙이면 어색하므로, 되묻는 문장만 간결하게 전달하세요.
+   도구 결과에 answer 필드가 있으면 이 3단계 구조를 직접 조립하지 말고 11번 규칙을
+   따르세요 — answer 안에 이미 같은 구조(라벨, 글머리표, 데이터 출처까지)가 완성되어
+   있으므로 그대로 출력하면 됩니다.
 4. 병용금기가 등록되지 않았다고 해서 안전하다는 뜻이 아님을 항상 명시하세요.
-   check_drug_interactions 결과에 symptom_safety_note 필드가 있으면, 그 문장을
-   고치거나 요약하지 말고 그대로 답변에 포함하세요(등록된 병용금기가 있는지
-   없는지와 무관하게 항상 포함).
+   check_drug_interactions 결과가 answer 필드를 포함하면(제품이 모두 특정된 경우),
+   그 안에 "(복용 후 주의)" bullet로 이미 포함되어 있으니 11번 규칙대로 그대로
+   출력하세요.
 5. 도구 결과의 resolved가 false이거나 confident가 false면, 절대 특정 제품으로
    단정하지 마세요. 도구 결과에 clarification_question 필드가 있으면, 그
    문장을 직접 새로 만들지 말고 반드시 그 문장을 그대로(고치거나 요약하지 말고)
@@ -294,7 +297,7 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    이 약을 계속 복용 중이라면 약사나 의사와 상담하라고 안내하세요. (cancel_name이
    정상인 경우 도구 결과에 그 필드 자체가 없으니, 판매 상태는 비정상일 때만
    언급하면 됩니다.)
-10. get_drug_info나 check_drug_interactions 결과의 dur_cautions 목록에는 노인주의/
+10. get_drug_info 결과의 dur_cautions 목록에는 노인주의/
     특정연령대금기/용량주의/투여기간주의/서방정분할주의/임부금기/첨가제주의가 섞여
     있을 수 있습니다. 사용자 질문이 "노인이 먹어도 되나요", "소아가 먹어도
     되나요", "하루 몇 번까지", "며칠까지 먹어도 되나요", "쪼개 먹어도 되나요",
@@ -309,30 +312,12 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
     등록되어 있습니다" 정도로만 언급하고 구체적인 제한 수치나 대상 연령을 지어내지
     마세요. 등록된 항목이 없으면 "등록된 정보가 없습니다"라고만 답하고
     안전하다고 단정하지 마세요.
-11. check_drug_interactions 결과에 effect_group_duplicates가 있으면(서로 다른
-    성분이지만 같은 효능군에 속해 효과가 중복될 수 있는 경우), duplicate_ingredients와
-    마찬가지로 과다복용과 비슷한 위험으로 안내하세요(예: "두 약 모두
-    {effect_group}에 속해 효과가 중복될 수 있습니다").
-12. ask_lifestyle_question 결과의 relevant_paragraphs는 유사도 순으로 정렬된
-    후보 문단 목록입니다(score가 높을수록 질문과 관련 있을 가능성이 높지만,
-    낮은 순위에 실제 정답이 있을 수도 있으니 목록 전체를 검토하세요). 이 중
-    질문에 실제로 답이 되는 내용이 있는지 직접 판단한 뒤:
-    - 답이 되는 문단이 있으면 "사용상주의사항에 따르면"으로 시작해 그 문단의
-      원문을 거의 그대로(의역하거나 결론을 지어내지 말고) 근거로 제시하세요.
-      추측이나 일반 상식으로 답을 보충하지 말고, 그 문단에 실제로 쓰여 있는
-      내용만 전달하세요.
-    - 여러 문단에 걸쳐 관련 내용이 나뉘어 있으면 그것들을 종합해서 답해도
-      되지만, 역시 각 문단에 실제로 쓰여 있는 내용 범위를 벗어나지 마세요.
-    - 후보 중 실제로 질문에 답이 되는 내용이 없으면 "관련된 사용상주의사항을
-      찾을 수 없습니다"라고 답하세요. 억지로 가장 비슷해 보이는 문단을 답인
-      것처럼 포장하지 마세요.
-13. check_drug_interactions 결과에 same_product_repeated가 true이면, 사용자가
-    같은 제품을 여러 번 말한 것입니다. 이는 병용 문제가 아니므로 "병용", "함께
-    복용 시 주의" 같은 표현을 쓰지 마세요. 대신 "같은 제품을 중복해서 드시는
-    것이므로 과다복용에 주의해야 합니다"라고 안내하고, usage_info의 용법용량 원문과
-    과량투여 관련 원문을 그대로 전달하세요(몇 시간 간격인지, 성인·소아 기준 몇 정인지
-    등). 원문에 없는 내용은 지어내지 마세요.
-14. 사용자가 과다복용·과량 복용 결과를 물으면(예: "타이레놀 과다복용하면 어떻게 돼?"),
+11. ask_lifestyle_question, get_overdose_info, check_drug_interactions(제품이
+    모두 특정된 경우) 결과에 answer 필드가 있으면, 그 문자열을 글자 하나, 줄바꿈이나
+    라벨 하나도 바꾸지 말고 통째로 그대로 출력하세요 — [조회된 사실]/[정리]/약사 상담/
+    데이터 출처까지 이미 다 조립되어 있습니다. 요약하거나, 라벨을 **굵게**나 다른
+    말로 바꾸거나, 문장을 합치거나 순서를 바꾸거나, 근거에 없는 말을 덧붙이지 마세요.
+12. 사용자가 과다복용·과량 복용 결과를 물으면(예: "타이레놀 과다복용하면 어떻게 돼?"),
     제품이 특정된 뒤 ask_lifestyle_question(NB)으로 과량투여 관련 원문을 찾아 그대로
     전달하세요. 제품이 특정되지 않았으면 제품부터 되물으세요. 지금 증상이 심하다고
     하면 119 연락을 먼저 안내하고, 그 다음에 원문 내용을 덧붙이세요.
@@ -453,6 +438,47 @@ TOOLS = [
 ]
 
 
+_SYMPTOM_SAFETY_BULLET = (
+    "- (복용 후 주의) 이 약들을 함께 복용한 후 평소와 다른 증상(어지러움, 메스꺼움, 두드러기, "
+    "졸림 등)이 나타나면 즉시 복용을 중단하고 의사나 약사와 상담하세요. 증상이 심하면 119에 연락하세요."
+)
+
+
+def _interaction_facts(result):
+    """병용금기·성분 중복·효능군 중복을 bullet로 나열한다. 어떤 종류인지 라벨을 붙여서
+    한 줄로 뭉쳐 보여주던 것보다 어떤 조합이 왜 문제인지 구분해서 볼 수 있게 한다."""
+    bullets = []
+    for h in result.get("dur_taboo_matches", []):
+        bullets.append(
+            f"- (병용금기) {h['drug_a']}({h['ingredient_a']})과 {h['drug_b']}({h['ingredient_b']}): {h['reason']}"
+        )
+    for d in result.get("duplicate_ingredients", []):
+        bullets.append(
+            f"- (성분 중복) {d['ingredient']} 성분이 {', '.join(d['drugs'])}에 공통으로 들어 있어 과다복용 위험이 있습니다."
+        )
+    for e in result.get("effect_group_duplicates", []):
+        bullets.append(
+            f"- (효능군 중복) {e['drug_a']}과 {e['drug_b']}는 {e['effect_group']}에 속해 효과가 중복될 수 있습니다."
+        )
+    if not bullets:
+        bullets.append("- 이 제품들의 조합은 의약품안전사용서비스에 등록된 병용금기가 없습니다.")
+    bullets.append(_SYMPTOM_SAFETY_BULLET)
+    return "\n".join(bullets)
+
+
+def _interaction_summary(result):
+    # 병용금기·성분 중복·효능군 중복은 서로 다른 성격의 위험이라, 가장 심각한 것부터
+    # 하나만 골라 한 줄로 말한다(LLM에 맡기지 않고 Python이 정한다 — 이미 구조화된
+    # 결과라 요약을 다시 판단할 필요가 없고, 매번 같은 결론이 나와야 한다).
+    if result.get("dur_taboo_matches"):
+        return "등록된 병용금기가 있으므로 함께 복용해서는 안 됩니다."
+    if result.get("duplicate_ingredients"):
+        return "같은 성분이 중복되어 과다복용 위험이 있습니다."
+    if result.get("effect_group_duplicates"):
+        return "효능이 겹치는 성분이 있어 과다복용과 비슷한 위험이 있습니다."
+    return "등록된 병용금기가 없습니다."
+
+
 def _tool_check_drug_interactions(product_names):
     result = check_multiple_drugs(product_names)
 
@@ -477,27 +503,25 @@ def _tool_check_drug_interactions(product_names):
         # 과량 문구는 e약은요 요약이 아니라 원본 NB 문서에만 있으므로 원본을 본다.
         raw_caution = doc_xml_to_text(_get_detail(seq).get("NB_DOC_DATA"))
         overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+        usage = " ".join((detail.get("용법용량") or "").split())
+        facts = "\n".join(
+            [f"- (용법용량) {usage}"] + [_plain_bullets(overdose_sentences, "과량투여")]
+        ) if overdose_sentences else f"- (용법용량) {usage}"
+        summary = "같은 제품을 중복해서 드시는 것이므로, 병용이 아니라 과다복용에 주의해야 합니다."
         return {
             "same_product_repeated": True,
             "item_name": detail.get("item_name"),
-            "usage_info": {
-                "용법용량": detail.get("용법용량"),
-                "과량투여_관련_사용상주의사항": overdose_sentences,
-            },
-            "data_source": "의약품 제품허가정보 기준",
+            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+            "note": _ANSWER_NOTE,
         }
 
     # 병용 답변은 병용금기와 성분 중복만 다룬다. 제품별 연령·대상 주의는 병용과 무관하므로 싣지 않는다.
     for r in result.get("resolved_drugs", []):
         r.pop("dur_cautions", None)
-    if not result.get("dur_taboo_matches"):
-        result["combination_summary"] = "이 제품들의 조합은 의약품안전사용서비스에 등록된 병용금기가 없습니다."
-    result["data_source"] = "의약품안전사용서비스 기준"
-    result["symptom_safety_note"] = (
-        "이 약들을 함께 복용한 후 평소와 다른 증상(어지러움, 메스꺼움, 두드러기, "
-        "졸림 등)이 나타나면 즉시 복용을 중단하고 의사나 약사와 상담하세요. "
-        "증상이 심하면 119에 연락하세요."
-    )
+    facts = _interaction_facts(result)
+    summary = _interaction_summary(result)
+    result["answer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준")
+    result["note"] = _ANSWER_NOTE
     return result
 
 
@@ -638,12 +662,6 @@ def _food_evidence_missing(term, paragraphs):
     return not (check.choices[0].message.content or "").strip().upper().startswith("YES")
 
 
-def _food_target_missing(question, paragraphs):
-    """질문의 음식·음료가 근거 문단에 한 번도 나오지 않으면 True. 음식이 아니면 판단하지 않고 False."""
-    term = _food_term(question)
-    if term is None:
-        return False
-    return _food_evidence_missing(term, paragraphs)
 
 
 _CONDITION_PICK_PROMPT = """복용자 상황: "{condition}"
@@ -716,13 +734,85 @@ def _age_group(question):
     return None
 
 
-_RENDER_PROMPT = """아래 문단은 한 가지 조건에 대한 사용상주의사항입니다.
-문단의 내용을 이해하기 쉬운 말로 옮기세요. 문단에 없는 내용은 쓰지 마세요.
-결론이나 주의를 말하는 문장(예: 무시해도 좋을 것으로 예상된다, 신중히 투여, 투여하지 말 것, 증강시킬 수 있다)은 문단의 표현을 한 글자도 바꾸지 말고 그대로 옮기세요. 그 밖의 설명만 쉬운 말로 바꿀 수 있습니다.
-번호나 라벨은 쓰지 마세요.
+_BULLET_PROMPT = """아래 문단을 번호 순서대로, 번호마다 한 문장씩 이해하기 쉬운 말로 바꾸세요.
+문단에 없는 내용은 쓰지 마세요. 결론이나 주의를 말하는 표현(예: 무시해도 좋을 것으로 예상된다, 신중히 투여, 투여하지 말 것, 증강시킬 수 있다)은 원문 표현을 한 글자도 바꾸지 말고 그대로 옮기세요. 그 밖의 설명만 쉬운 말로 바꿀 수 있습니다.
+번호와 줄 개수를 입력과 똑같이 유지하고 "1. 문장" 형식으로만 쓰세요. 다른 말은 덧붙이지 마세요.
 
 {blocks}
 """
+
+
+def _section_label(text):
+    """문단 맨 앞의 [...] 표시(예: "[6. 상호작용]")를 조항 이름으로 뽑는다. 없으면 None.
+    일부 제품은 이 표시 자체가 문단 내용과 거의 같은 긴 문장("[3. 다음과 같은 사람은
+    ... 상의할 것]")이라, 그대로 라벨로 쓰면 본문과 중복돼 보인다. 짧은 조항명일 때만 쓴다."""
+    m = re.match(r"\[([^\]]*)\]", text)
+    if not m:
+        return None
+    label = m.group(1)
+    return label if len(label) <= 22 else None
+
+
+def _render_bullets(evidence_texts):
+    """근거 문단마다 쉬운 말 한 문장 + 원문 조항 이름을 붙인 bullet 목록을 만든다.
+    문단을 하나로 합쳐서 긴 문단으로 보여주면 가독성이 떨어지고 어느 조항에서 나온 내용인지
+    알 수 없으므로, 문단 단위를 끝까지 유지하면서 문장만 쉬운 말로 바꾼다."""
+    if not evidence_texts:
+        return []
+    labels = [_section_label(t) for t in evidence_texts]
+    bodies = [re.sub(r"^\[[^\]]*\]\s*", "", t) for t in evidence_texts]
+    numbered = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(bodies))
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _BULLET_PROMPT.format(blocks=numbered)}],
+    )
+    rewritten = {}
+    for line in (resp.choices[0].message.content or "").splitlines():
+        m = re.match(r"\s*(\d+)[.\)]\s*(.+)", line)
+        if m:
+            rewritten[int(m.group(1))] = m.group(2).strip()
+    return [
+        {"label": labels[i], "text": rewritten.get(i + 1, bodies[i])}
+        for i in range(len(evidence_texts))
+    ]
+
+
+def _bullets_to_md(bullets):
+    lines = []
+    for b in bullets:
+        prefix = f"(출처: {b['label']}) " if b["label"] else ""
+        lines.append(f"- {prefix}{b['text']}")
+    return "\n".join(lines)
+
+
+def _plain_bullets(sentences, tag):
+    """[...] 라벨이 없는 문장 목록(과량투여 문구 등)을 bullet로 다듬는다.
+    원문이 문장 단위로 쪼개져 있어서 "2) 과량투여시의 처치"처럼 제목만 있고 내용이
+    없는 조각이 그대로 나오곤 했다. 번호를 떼고 LLM에게 한 문장씩 다시 쓰게 해서
+    다른 bullet들과 톤을 맞춘다."""
+    cleaned = [re.sub(r"^\d+[.)]\s*", "", s).strip() for s in sentences]
+    cleaned = [s for s in cleaned if s]
+    bullets = _render_bullets(cleaned)
+    return "\n".join(f"- ({tag}) {b['text']}" for b in bullets)
+
+
+_ANSWER_NOTE = (
+    "answer 필드를 글자 하나, 줄바꿈이나 라벨 하나도 바꾸지 말고 그대로 출력하세요. "
+    "요약하거나, 라벨을 **굵게**로 바꾸거나, 설명을 더 붙이거나 빼지 마세요. 이게 전체 답변입니다."
+)
+
+
+def _assemble_answer(facts, summary, data_source):
+    """최종 답변 문자열을 Python에서 전부 완성한다. facts/summary를 따로 주고 메인 LLM에게
+    조립을 맡기면, 라벨을 **굵게**로 바꾸거나 문단을 빠뜨리거나 근거에 없는 결론("운전은
+    가능하다" 등)을 덧붙이는 경우가 있었다. 조립까지 끝낸 문자열 하나를 그대로 출력하게
+    하면 이런 흔들림이 없다."""
+    parts = ["[조회된 사실]", facts]
+    if summary:
+        parts += ["", "[정리]", summary]
+    parts += ["", "약사나 의사와 상담하시기 바랍니다.", "", f"데이터 출처: {data_source}"]
+    return "\n".join(parts)
 
 _SUMMARY_PROMPT = """아래 조회된 사실을 한 문장으로 짧게 정리하세요. 이것은 요약이지, 다시 말하는 것이 아닙니다.
 - 조건마다 가장 중요한 결론 하나만 고르세요. 한 조건에 여러 주의사항이 있어도 전부 나열하지 말고 제일 중요한 것 하나만 쓰세요.
@@ -737,7 +827,7 @@ _SUMMARY_PROMPT = """아래 조회된 사실을 한 문장으로 짧게 정리�
 
 
 def _render_facts(conditions_out):
-    """조건마다 따로 LLM에게 옮겨 쓰게 하고, Python이 조건 제목을 붙여 조립한다.
+    """조건마다 따로 문단을 bullet로 바꾸고, Python이 조건 제목을 붙여 조립한다.
     근거가 있는지 없는지는 Python이 이미 알고 있으므로 그 판단은 LLM에게 다시 맡기지 않는다
     (맡기면 근거가 있어도 '관련 없음'이라고 잘못 쓰는 경우가 있었다). 조건마다 따로 조립하면
     가독성을 위해 조건 제목을 항상 붙일 수 있고, 한 조건의 문단이 다른 조건의 설명에 섞여
@@ -745,16 +835,10 @@ def _render_facts(conditions_out):
     parts = []
     for c in conditions_out:
         if not c["evidence"]:
-            parts.append(f"**{c['condition']}**\n이 조건과 관련된 주의사항은 없습니다.")
+            parts.append(f"**{c['condition']}**\n- 이 조건과 관련된 주의사항은 없습니다.")
             continue
-        blocks = "\n".join(f"- {t}" for t in c["evidence"])
-        resp = _client.chat.completions.create(
-            model=CHAT_MODEL,
-            temperature=0,
-            messages=[{"role": "user", "content": _RENDER_PROMPT.format(blocks=blocks)}],
-        )
-        rendered = (resp.choices[0].message.content or "").strip()
-        parts.append(f"**{c['condition']}**\n{rendered}")
+        bullets = _render_bullets(c["evidence"])
+        parts.append(f"**{c['condition']}**\n{_bullets_to_md(bullets)}")
     return "\n\n".join(parts)
 
 
@@ -808,15 +892,10 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         return {
             "resolved": True,
             "item_name": item_name,
-            "facts": facts,
-            "summary": summary,
+            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
             "conditions": conditions_out,
             "relevant_paragraphs": found,
-            "note": "답변은 아래 세 부분을 모두 빠짐없이 출력하세요. 1) [조회된 사실] 라벨 아래에 facts를 글자 하나, 줄바꿈 하나도 바꾸지 말고 그대로 씁니다. "
-                    "facts의 조건 제목(**조건**)과 조건 사이 빈 줄은 그대로 유지하세요 — 이게 가독성을 위한 구조입니다. "
-                    "2) [정리] 라벨 아래에 summary를 그대로 씁니다. summary가 비어 있을 때만 이 부분을 생략합니다. "
-                    "3) 마지막 줄에 '약사나 의사와 상담하시기 바랍니다.'를 붙입니다. 문장을 고치거나 덧붙이지 마세요.",
-            "data_source": "의약품 제품허가정보 기준",
+            "note": _ANSWER_NOTE,
         }
 
     paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
@@ -825,17 +904,24 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         ud = search_paragraphs(item_seq, "UD", question, top_k=4)
         seen = {p["text"] for p in ud}
         paragraphs = ud + [p for p in paragraphs if p["text"] not in seen]
-    if paragraphs and _food_target_missing(question, paragraphs):
-        paragraphs = []
-    if not paragraphs:
+    picked = _pick_for_condition(question, paragraphs)
+    if not picked and paragraphs:
+        # 음식·음료 질문일 때만 완화해서 top-2를 본다. 음식이 아닌 질문까지 완화하면
+        # 근거가 전혀 없는데도 무관한 문단이 섞여 들어간다.
+        term = _food_term(question)
+        if term and not _food_evidence_missing(term, paragraphs[:3]):
+            picked = paragraphs[:2]
+    picked = _attach_body(picked, _get_paragraphs(item_seq, field))
+    if not picked:
         return _no_evidence_result(item_name)
+    facts = _bullets_to_md(_render_bullets([p["text"] for p in picked]))
+    summary = _make_summary(facts)
     return {
         "resolved": True,
         "item_name": item_name,
-        "relevant_paragraphs": paragraphs,
-        "note": "'사용상주의사항에 따르면'으로 시작하고, 조회된 문단의 표현을 그대로 옮기세요. "
-                "문단에 없는 '투여할 수 있다', '먹어도 된다' 같은 허용 결론은 쓰지 마세요. [조회된 사실] 같은 라벨은 쓰지 마세요.",
-        "data_source": "의약품 제품허가정보 기준",
+        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "relevant_paragraphs": picked,
+        "note": _ANSWER_NOTE,
     }
 
 
@@ -867,11 +953,15 @@ def _tool_get_overdose_info(product_name):
     item_name = result["candidates"][0]["item_name"]
     raw_caution = doc_xml_to_text(_get_detail(item_seq).get("NB_DOC_DATA"))
     overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+    if not overdose_sentences:
+        return _no_evidence_result(item_name)
+    facts = _plain_bullets(overdose_sentences, "과량투여")
+    summary = _make_summary(facts)
     return {
         "resolved": True,
         "item_name": item_name,
-        "과량투여_관련_사용상주의사항": overdose_sentences,
-        "data_source": "의약품 제품허가정보 기준",
+        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "note": _ANSWER_NOTE,
     }
 
 
