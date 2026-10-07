@@ -15,8 +15,9 @@ from emergency_detect import detect_emergency
 from drug_lookup import check_multiple_drugs, search_product_with_confidence, get_product_detail, _get_detail
 from text_extract import doc_xml_to_text
 from symptom_search import search_by_symptom
-from paragraph_search import search_paragraphs
+from paragraph_search import search_paragraphs, _get_paragraphs
 from multi_condition import extract_conditions, search_by_conditions
+from name_kind import classify_names
 
 load_dotenv()
 
@@ -537,6 +538,124 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     return {"candidates": results, "data_source": "의약품 제품허가정보 기준"}
 
 
+_DIRECT_FILTER_PROMPT = """사용자 질문: "{question}"
+
+아래 문단 중에서 이 질문에 직접 답이 되는 문단의 번호만 쉼표로 적으세요.
+질문의 대상(음식, 음료, 행동 등)을 다른 것으로 바꿔 해석한 문단, 질문과 단어만 비슷한 문단은 제외합니다.
+직접 답이 되는 문단이 없으면 "없음"이라고만 답하세요.
+
+[문단]
+{paragraphs}
+"""
+
+
+def _filter_direct(question, paragraphs):
+    """리랭킹이 남긴 문단 중 질문에 직접 답하는 것만 남긴다. 이 확인에서 떨어지면 근거 없음으로 본다."""
+    if not paragraphs:
+        return []
+    text = "\n".join(f"{i + 1}. {p['text']}" for i, p in enumerate(paragraphs))
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _DIRECT_FILTER_PROMPT.format(question=question, paragraphs=text)}],
+    )
+    numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
+    return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
+
+
+_FOOD_EVIDENCE_PROMPT = """음식 또는 음료: "{term}"
+
+아래 문단 중에 "{term}"을(를) 직접 다루는 내용이 있는지 판단하세요.
+같은 뜻으로 쓰인 말도 인정합니다. 예: 술은 알코올, 커피는 카페인 등.
+"알코올섭취"처럼 마시는 술에 대한 내용은 술(음료)에 대한 내용이므로 YES입니다.
+약의 성분, 부형제, 수유 중 이행 같은 내용은 음식 자체에 대한 내용이 아니므로 NO입니다.
+단어만 비슷하거나 다른 물질에 관한 내용이면 NO입니다. 음식 자체를 직접 다루면 YES, 아니면 NO만 답하세요.
+
+[문단]
+{paragraphs}
+"""
+
+_FOOD_TARGET_PROMPT = """사용자 질문: "{question}"
+
+질문에 나온 음식이나 음료의 이름을 하나만 적으세요. 없으면 "없음"이라고만 적으세요.
+약 이름, 질환, 나이 등은 적지 마세요.
+"""
+
+
+def _food_target_missing(question, paragraphs):
+    """질문의 음식·음료가 근거 문단에 한 번도 나오지 않으면 True. 음식이 아니면 판단하지 않고 False."""
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _FOOD_TARGET_PROMPT.format(question=question)}],
+    )
+    term = (resp.choices[0].message.content or "").strip().strip("\"'")
+    if not term or term == "없음":
+        return False
+    if classify_names([term], CHAT_MODEL).get(term) != "food":
+        return False
+    text = "\n".join(f"- {p['text']}" for p in paragraphs)
+    check = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _FOOD_EVIDENCE_PROMPT.format(term=term, paragraphs=text)}],
+    )
+    return not (check.choices[0].message.content or "").strip().upper().startswith("YES")
+
+
+_CONDITION_PICK_PROMPT = """복용자 상황: "{condition}"
+
+아래 문단 중에서 이 상황에 직접 해당하는 내용을 다루는 문단의 번호만 쉼표로 적으세요.
+같은 뜻의 말은 같은 것으로 봅니다. 예: 콩팥과 신장, 신기능은 같은 뜻입니다. 음주와 알코올도 같은 뜻입니다.
+문단 안에 같은 단어가 들어 있다는 것만으로는 해당하지 않습니다. 상황에 놓인 환자에 대해 주의, 금기, 용량 조절 등을 말하는 문단만 고르세요.
+이상반응 빈도 목록, 부작용 발현율 목록은 상황에 대한 주의가 아니므로 제외합니다.
+해당하는 문단이 없으면 "없음"이라고만 답하세요.
+
+[문단]
+{paragraphs}
+"""
+
+
+def _pick_for_condition(condition, paragraphs):
+    """조건에 직접 해당하는 문단만 고른다. 고른 문단은 원문 그대로 쓴다."""
+    if not paragraphs:
+        return []
+    text = "\n".join(f"{i + 1}. {p['text']}" for i, p in enumerate(paragraphs))
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _CONDITION_PICK_PROMPT.format(condition=condition, paragraphs=text)}],
+    )
+    numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
+    return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
+
+
+def _attach_body(picked, all_paragraphs):
+    """짧은 제목 문단(예: "[11. 기타] ② 신기능 부전증")이 골라지면, 바로 뒤의 본문 문단을 함께 붙인다.
+    본문은 같은 장 표시를 가지고 있고, 다음 소제목(짧은 문단)을 만나면 멈춘다."""
+    texts = list(all_paragraphs)
+    result = []
+    seen = set()
+    for p in picked:
+        if p["text"] not in seen:
+            seen.add(p["text"])
+            result.append(p)
+        if len(p["text"]) >= 60 or p["text"] not in texts:
+            continue
+        i = texts.index(p["text"])
+        label = re.match(r"\[[^\]]*\]", p["text"])
+        if not label:
+            continue
+        for j in range(i + 1, min(i + 3, len(texts))):
+            nxt = texts[j]
+            if not nxt.startswith(label.group(0)) or len(nxt) < 60:
+                break
+            if nxt not in seen:
+                seen.add(nxt)
+                result.append({"text": nxt, "score": p["score"], "condition": p.get("condition")})
+    return result
+
+
 def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     result = search_product_with_confidence(product_name)
     if not result["confident"]:
@@ -551,13 +670,57 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     item_name = result["candidates"][0]["item_name"]
     conditions = extract_conditions(question, CHAT_MODEL)
     if len(conditions) >= 2:
-        paragraphs = search_by_conditions(item_seq, field, conditions, top_k=8)
-    else:
-        paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
+        # 조건마다 따로 근거를 판정한다. 근거가 없는 조건은 그 조건만 없다고 말한다.
+        conditions_out = []
+        found = []
+        for c in conditions:
+            paras = _pick_for_condition(c, search_paragraphs(item_seq, field, c, top_k=8))
+            paras = _attach_body(paras, _get_paragraphs(item_seq, field))
+            if paras:
+                found.extend(paras)
+            conditions_out.append({
+                "condition": c,
+                "evidence": [p["text"] for p in paras],
+            })
+        if not found:
+            return _no_evidence_result(item_name)
+        return {
+            "resolved": True,
+            "item_name": item_name,
+            "conditions": conditions_out,
+            "relevant_paragraphs": found,
+            "note": "다음 형식으로 답하세요. 번호는 붙이지 마세요. [조회된 사실] 섹션을 먼저 쓰고, 이어서 [정리] 섹션을 씁니다. conditions의 조건마다 evidence 문단을 이해하기 쉬운 말로 옮깁니다. "
+                    "evidence가 비어 있는 조건은 '해당 조건과 관련된 주의사항은 없습니다'라고 씁니다. "
+                    "[정리] 섹션: 위 조회된 사실만 바탕으로 한 줄로 요약합니다. 근거에 없는 결론이나 '안전하다'는 말은 쓰지 마세요. "
+                    "마지막 줄에 약사 상담을 권하세요. evidence에 없는 내용은 어디에도 덧붙이지 마세요.",
+            "data_source": "의약품 제품허가정보 기준",
+        }
+
+    paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
+    paragraphs = _filter_direct(question, paragraphs)
+    if paragraphs and _food_target_missing(question, paragraphs):
+        paragraphs = []
+    if not paragraphs:
+        return _no_evidence_result(item_name)
     return {
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": paragraphs,
+        "data_source": "의약품 제품허가정보 기준",
+    }
+
+
+def _no_evidence_result(item_name):
+    # 근거가 없으면 LLM이 제각각 말하지 않도록 문장을 코드에서 고정한다.
+    return {
+        "resolved": True,
+        "item_name": item_name,
+        "relevant_paragraphs": [],
+        "no_evidence_answer": (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
+                               "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
+                               "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다."),
+        "note": "no_evidence_answer 문장을 그대로 답변으로 출력하세요. 다른 설명을 덧붙이거나 "
+                "'병용금기가 없다'처럼 바꾸지 마세요.",
         "data_source": "의약품 제품허가정보 기준",
     }
 
@@ -668,6 +831,15 @@ class Conversation:
                     # 질문이므로 생활질문 도구로 바꿔서 원래 질문 전체를 넘긴다.
                     fn_name = "ask_lifestyle_question"
                     fn_args = {"product_name": fn_args["product_names"][0], "question": user_message}
+                if fn_name == "check_drug_interactions":
+                    # 병용확인으로 넘어온 이름 중 음식·음료가 있으면 병용확인이 아니라 생활질문이다.
+                    names = fn_args.get("product_names", [])
+                    kinds = classify_names(names, CHAT_MODEL) if names else {}
+                    foods = [n for n in names if kinds.get(n) == "food"]
+                    if foods:
+                        drugs = [n for n in names if n not in foods]
+                        fn_name = "ask_lifestyle_question"
+                        fn_args = {"product_name": (drugs or names)[0], "question": user_message}
                 if fn_name == "get_drug_info" and len(extract_conditions(user_message, CHAT_MODEL)) >= 2:
                     # 조건이 두 개 이상이면 DUR 전문 조회로는 조건별 근거를 보장할 수 없다.
                     # 생활질문 경로에서 조건마다 따로 검색한다.
