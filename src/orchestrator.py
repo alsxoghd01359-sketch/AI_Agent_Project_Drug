@@ -4,6 +4,7 @@
 그 외에는 OpenAI의 tool calling으로 어떤 함수를 어떤 인자로 부를지 LLM이
 판단하게 하고, 우리는 실제 실행과 결과 전달만 담당한다.
 """
+import html
 import json
 import os
 import re
@@ -833,15 +834,15 @@ def _split_field(tag, text, max_len=80):
     """효능효과·용법용량처럼 한 필드에 여러 항목이 들어있는 긴 텍스트를 항목별 bullet로
     나눈다. "1. ...  2. ..."나 "○ ..." 같은 표시가 있으면 그 단위로, 없으면 문장
     단위로 나눈다. 짧으면(그 자체로 한 항목이면) bullet 하나만 둔다."""
-    text = " ".join((text or "").split())
+    text = " ".join(html.unescape(text or "").split())
     if not text:
         return []
     if len(text) <= max_len:
         return [f"- ({tag}) {text}"]
     parts = re.split(r"\s*(?=(?:\d+\.\s)|(?:\(\d+\)\s)|(?:○\s))", text)
-    parts = [p.strip() for p in parts if p.strip()]
+    parts = [p.strip() for p in parts if len(p.strip()) > 1]
     if len(parts) <= 1:
-        parts = [s.strip() for s in re.split(r"(?<=[.다])\s+", text) if s.strip()]
+        parts = [s.strip() for s in re.split(r"(?<=[.다])\s+", text) if len(s.strip()) > 1]
     return [f"- ({tag}) {p}" for p in parts] if parts else [f"- ({tag}) {text}"]
 
 
