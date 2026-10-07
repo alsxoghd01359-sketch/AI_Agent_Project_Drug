@@ -223,7 +223,7 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
 2. "안전합니다", "괜찮습니다", "문제없습니다" 같은 확신 표현을 쓰지 마세요.
    대신 "등록된 정보가 없습니다"처럼 사실 서술형으로만 답하세요.
 3. 성분/효능/용법/주의사항/상호작용처럼 실제 조회된 데이터를 전달하는 답변에는
-   [조회된 사실] -> [주의사항] -> [상담 권유] 순서를 지키세요.
+   [조회된 사실], [주의사항], [상담 권유] 순서를 지키세요. 섹션 사이에 화살표(->)는 쓰지 마세요.
    - [주의사항]은 "데이터의 한계로 추가 정보를 제공할 수 없습니다"처럼 우리 쪽 데이터가
      부족해서 못 알려준다는 식으로 쓰지 마세요. 대신 "이 정보는 일반적인 내용이며,
      개인의 체질이나 건강 상태, 복용 중인 다른 약에 따라 실제로 다르게 적용될 수
@@ -487,6 +487,11 @@ def _tool_check_drug_interactions(product_names):
             "data_source": "의약품 제품허가정보 기준",
         }
 
+    # 병용 답변은 병용금기와 성분 중복만 다룬다. 제품별 연령·대상 주의는 병용과 무관하므로 싣지 않는다.
+    for r in result.get("resolved_drugs", []):
+        r.pop("dur_cautions", None)
+    if not result.get("dur_taboo_matches"):
+        result["combination_summary"] = "이 제품들의 조합은 의약품안전사용서비스에 등록된 병용금기가 없습니다."
     result["data_source"] = "의약품안전사용서비스 기준"
     result["symptom_safety_note"] = (
         "이 약들을 함께 복용한 후 평소와 다른 증상(어지러움, 메스꺼움, 두드러기, "
@@ -503,8 +508,8 @@ def _tool_get_drug_info(product_name):
             "resolved": False,
             "candidate_groups": result.get("candidate_groups", []),
             "clarification_question": result.get("clarification_question"),
-            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장을 "
-                    "그대로 답변에 포함해 사용자에게 되물으세요.",
+            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장만 그대로 답변으로 출력하세요. "
+                    "'정보를 확인할 수 없다', '제품명이 정확히 특정되지 않았다' 같은 말을 덧붙이지 마세요.",
         }
     item_seq = result["candidates"][0]["item_seq"]
     detail = get_product_detail(item_seq, live_status=True)
@@ -522,6 +527,31 @@ def _tool_get_drug_info(product_name):
         detail.pop("cancel_name", None)
         detail.pop("cancel_date", None)
     return detail
+
+
+def _tool_get_age_dur_info(product_name, question):
+    detail = _tool_get_drug_info(product_name)
+    if not detail.get("resolved"):
+        return detail
+    group = _age_group(question)
+    types = _AGE_DUR_TYPES.get(group, ())
+    entries = [d for d in detail.get("dur_cautions", []) if d.get("type") in types]
+    if not entries:
+        # 연령 DUR 항목이 없으면 사용상주의사항 원문에서 질문과 관련된 문단을 찾는다.
+        return _tool_ask_lifestyle_question(product_name, question)
+    parts = [
+        f"{d['type']}: {d['content']}" if d.get("content")
+        else f"{d['type']}: 해당 유형으로 등록되어 있으나 구체적인 문구는 없습니다."
+        for d in entries
+    ]
+    return {
+        "resolved": True,
+        "item_name": detail["item_name"],
+        "age_answer": f"{detail['item_name']}의 의약품안전사용서비스 DUR 정보에는 다음과 같이 등록되어 있습니다. " + " ".join(parts),
+        "note": "age_answer 문장을 그대로 답변으로 출력하세요. 다른 설명을 덧붙이거나 말투를 바꾸지 마세요. "
+                "'먹어도 된다', '안전하다' 같은 결론은 쓰지 마세요. 마지막 줄에 약사 상담을 권하세요.",
+        "data_source": detail["data_source"],
+    }
 
 
 def _tool_search_by_symptom(symptom, current_medication_names=None):
@@ -607,7 +637,9 @@ _CONDITION_PICK_PROMPT = """복용자 상황: "{condition}"
 
 아래 문단 중에서 이 상황에 직접 해당하는 내용을 다루는 문단의 번호만 쉼표로 적으세요.
 같은 뜻의 말은 같은 것으로 봅니다. 예: 콩팥과 신장, 신기능은 같은 뜻입니다. 음주와 알코올도 같은 뜻입니다.
-문단 안에 같은 단어가 들어 있다는 것만으로는 해당하지 않습니다. 상황에 놓인 환자에 대해 주의, 금기, 용량 조절 등을 말하는 문단만 고르세요.
+상황의 대상(음식, 질환, 나이, 약 등)을 직접 언급하고 주의, 금기, 용량 조절 등을 말하는 문단을 고르세요.
+대상이 단어만 같을 뿐 다른 내용을 말하는 문단은 제외합니다.
+문단이 상황의 대상을 주제로 삼지 않고 다른 대상(예: 운전 상황에서 음주와의 병용, 신장 상황에서 다른 약과의 병용)을 주제로 삼으면 제외합니다.
 이상반응 빈도 목록, 부작용 발현율 목록은 상황에 대한 주의가 아니므로 제외합니다.
 해당하는 문단이 없으면 "없음"이라고만 답하세요.
 
@@ -656,6 +688,21 @@ def _attach_body(picked, all_paragraphs):
     return result
 
 
+_DURATION_OR_AMOUNT_RE = re.compile(r"(\d+|한|두|세|네|다섯)\s*(일|주|개월|달|알|정|회|번|시간)|넘게|하루|며칠|몇\s*(알|정|번|회|일)")
+
+# 나이 질문은 DUR 항목의 원문을 코드에서 그대로 옮긴다. 사용상주의사항 전체를 LLM에 넘기면
+# 여러 연령 문장이 섞여 "사용할 수 있다"처럼 원문에 없는 결론이 나왔다.
+_AGE_DUR_TYPES = {"elderly": ("노인주의",), "child": ("특정연령대금기",)}
+
+
+def _age_group(question):
+    if re.search(r"노인|고령|어르신|(?<!\d)(6\d|[7-9]\d)\s*세", question):
+        return "elderly"
+    if re.search(r"소아|어린이|유아|아이(?:가|는|에게|한테|들|$| )|(?<!\d)1?\d\s*세", question):
+        return "child"
+    return None
+
+
 def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     result = search_product_with_confidence(product_name)
     if not result["confident"]:
@@ -663,8 +710,8 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
             "resolved": False,
             "candidate_groups": result.get("candidate_groups", []),
             "clarification_question": result.get("clarification_question"),
-            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장을 "
-                    "그대로 답변에 포함해 사용자에게 되물으세요.",
+            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장만 그대로 답변으로 출력하세요. "
+                    "'정보를 확인할 수 없다', '제품명이 정확히 특정되지 않았다' 같은 말을 덧붙이지 마세요.",
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
@@ -674,7 +721,10 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         conditions_out = []
         found = []
         for c in conditions:
-            paras = _pick_for_condition(c, search_paragraphs(item_seq, field, c, top_k=8))
+            raw = search_paragraphs(item_seq, field, c, top_k=8)
+            paras = _pick_for_condition(c, raw)
+            if not paras and raw and not _food_target_missing(c, raw[:3]):
+                paras = raw[:2]
             paras = _attach_body(paras, _get_paragraphs(item_seq, field))
             if paras:
                 found.extend(paras)
@@ -691,13 +741,19 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
             "relevant_paragraphs": found,
             "note": "다음 형식으로 답하세요. 번호는 붙이지 마세요. [조회된 사실] 섹션을 먼저 쓰고, 이어서 [정리] 섹션을 씁니다. conditions의 조건마다 evidence 문단을 이해하기 쉬운 말로 옮깁니다. "
                     "evidence가 비어 있는 조건은 '해당 조건과 관련된 주의사항은 없습니다'라고 씁니다. "
-                    "[정리] 섹션: 위 조회된 사실만 바탕으로 한 줄로 요약합니다. 근거에 없는 결론이나 '안전하다'는 말은 쓰지 마세요. "
+                    "[정리] 섹션: 위 조회된 사실만 바탕으로 한 줄로 요약합니다. 결론은 evidence 문단의 표현을 그대로 가져오세요. "
+                    "예를 들어 문단이 '전혀 없거나 무시해도 좋을 것으로 예상된다'라고 하면 정리에도 그 표현을 쓰고, '큰 영향을 미치지 않을'처럼 강도를 바꾸지 마세요. "
+                    "근거에 없는 결론이나 '안전하다'는 말은 쓰지 마세요. "
                     "마지막 줄에 약사 상담을 권하세요. evidence에 없는 내용은 어디에도 덧붙이지 마세요.",
             "data_source": "의약품 제품허가정보 기준",
         }
 
     paragraphs = search_paragraphs(item_seq, field, question, top_k=8)
-    paragraphs = _filter_direct(question, paragraphs)
+    if _DURATION_OR_AMOUNT_RE.search(question):
+        # 용량·기간은 용법용량(UD) 항목에 있으므로 함께 찾는다.
+        ud = search_paragraphs(item_seq, "UD", question, top_k=4)
+        seen = {p["text"] for p in ud}
+        paragraphs = ud + [p for p in paragraphs if p["text"] not in seen]
     if paragraphs and _food_target_missing(question, paragraphs):
         paragraphs = []
     if not paragraphs:
@@ -706,6 +762,8 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": paragraphs,
+        "note": "'사용상주의사항에 따르면'으로 시작하고, 조회된 문단의 표현을 그대로 옮기세요. "
+                "문단에 없는 '투여할 수 있다', '먹어도 된다' 같은 허용 결론은 쓰지 마세요. [조회된 사실] 같은 라벨은 쓰지 마세요.",
         "data_source": "의약품 제품허가정보 기준",
     }
 
@@ -731,8 +789,8 @@ def _tool_get_overdose_info(product_name):
         return {
             "resolved": False,
             "clarification_question": result.get("clarification_question"),
-            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장을 "
-                    "그대로 답변에 포함해 사용자에게 되물으세요.",
+            "note": "제품명이 정확히 특정되지 않았습니다. clarification_question 문장만 그대로 답변으로 출력하세요. "
+                    "'정보를 확인할 수 없다', '제품명이 정확히 특정되지 않았다' 같은 말을 덧붙이지 마세요.",
         }
     item_seq = result["candidates"][0]["item_seq"]
     item_name = result["candidates"][0]["item_name"]
@@ -749,6 +807,7 @@ def _tool_get_overdose_info(product_name):
 TOOL_DISPATCH = {
     "check_drug_interactions": _tool_check_drug_interactions,
     "get_drug_info": _tool_get_drug_info,
+    "get_age_dur_info": _tool_get_age_dur_info,
     "search_by_symptom": _tool_search_by_symptom,
     "ask_lifestyle_question": _tool_ask_lifestyle_question,
     "get_overdose_info": _tool_get_overdose_info,
@@ -840,10 +899,17 @@ class Conversation:
                         drugs = [n for n in names if n not in foods]
                         fn_name = "ask_lifestyle_question"
                         fn_args = {"product_name": (drugs or names)[0], "question": user_message}
-                if fn_name == "get_drug_info" and len(extract_conditions(user_message, CHAT_MODEL)) >= 2:
+                if fn_name == "get_drug_info" and (
+                    len(extract_conditions(user_message, CHAT_MODEL)) >= 2
+                    or _DURATION_OR_AMOUNT_RE.search(user_message)
+                ):
                     # 조건이 두 개 이상이면 DUR 전문 조회로는 조건별 근거를 보장할 수 없다.
                     # 생활질문 경로에서 조건마다 따로 검색한다.
                     fn_name = "ask_lifestyle_question"
+                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
+                if fn_name == "get_drug_info" and _age_group(user_message):
+                    # 나이 질문은 연령 DUR 항목 원문으로 답한다. 전체 조회 결과를 주면 원문에 없는 결론이 섞인다.
+                    fn_name = "get_age_dur_info"
                     fn_args = {"product_name": fn_args["product_name"], "question": user_message}
                 fn = TOOL_DISPATCH.get(fn_name)
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}

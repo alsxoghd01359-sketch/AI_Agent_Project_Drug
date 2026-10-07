@@ -379,6 +379,27 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
         # 후보들이 왜 하나로 안 좁혀지는지 LLM이 알 수 있게, 성분 기준으로 묶어서 보여준다.
         # (예: "게보린"은 이름은 같아도 아세트아미노펜 계열/이부프로펜 계열로 실제 성분이 갈림)
         candidate_groups = _group_candidates_by_ingredient(candidates, ingr_sets)
+        # 점수 차이가 큰 유사 제품(예: 글자만 비슷한 다른 약)은 되묻기 목록에서 뺀다.
+        score_by_name = {c["item_name"]: c["score"] for c in candidates}
+        for g in candidate_groups:
+            g["products"] = [n for n in g["products"] if score_by_name.get(n, 0) >= top_score - 25]
+        candidate_groups = [g for g in candidate_groups if g["products"]]
+        # 질문에 성분명이 직접 들어 있는 계열을 앞에 둔다. 성분명이 더 긴 유사 계열은 뒤로 보낸다.
+        in_query = [g for g in candidate_groups if g["ingredients"][0] in query]
+        if in_query:
+            # 질문 성분과 같은 계열이 있으면, 그 계열 이름을 포함하는 더 긴 유사 계열은 목록에서 뺀다.
+            candidate_groups = [
+                g for g in candidate_groups
+                if g["ingredients"][0] in query
+                or not any(q["ingredients"][0] in g["ingredients"][0] for q in in_query)
+            ]
+        clean_query = _strip_brackets(normalize_units(query)).replace(" ", "")
+        if len(clean_query) >= 3:
+            head = re.sub(r"[^가-힣a-zA-Z]", "", clean_query)[:3]
+            for g in candidate_groups:
+                g["products"] = [n for n in g["products"] if head in re.sub(r"[^가-힣a-zA-Z]", "", n)]
+            candidate_groups = [g for g in candidate_groups if g["products"]]
+        candidate_groups.sort(key=lambda g: g["ingredients"][0] not in query)
         result["candidate_groups"] = candidate_groups
 
         # 그룹 안에 제품이 여러 개면(예: 타이레놀 계열 안에 정/산제/현탁액/서방정/감기

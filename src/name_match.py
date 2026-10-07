@@ -46,13 +46,6 @@ def _load_index():
             rec = json.loads(line)
             index.append((rec.get("ITEM_SEQ"), rec.get("ITEM_NAME"), "의약품"))
 
-    with (DATA_DIR / "htfs_item.jsonl").open(encoding="utf-8") as f:
-        for line in f:
-            rec = json.loads(line)
-            name = (rec.get("PRDUCT") or "").strip()
-            if name:
-                index.append((rec.get("STTEMNT_NO"), name, "건강기능식품"))
-
     _NAME_INDEX = index
     global _CLEAN_NAMES
     _NORMALIZED_NAMES = [normalize_units(name or "") for _, name, _ in index]

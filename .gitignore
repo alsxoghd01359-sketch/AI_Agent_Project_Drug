@@ -16,3 +16,6 @@ out.txt
 
 # 에디터
 .vscode/
+
+# 데이터코드
+data_catalog.xlsx

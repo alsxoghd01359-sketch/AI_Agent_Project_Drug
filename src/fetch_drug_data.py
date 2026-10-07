@@ -30,9 +30,7 @@ OPERATIONS = [
     ("dur_efcy_dplct", "dur", "getEfcyDplctInfoList03", {}),
     ("dur_seobangjeong_partitn_atent", "dur", "getSeobangjeongPartitnAtentInfoList03", {}),
     ("dur_pwnm_taboo", "dur", "getPwnmTabooInfoList03", {}),
-    ("pill_ident", "pill", "getMdcinGrnIdntfcInfoList03", {}),
     ("easy_drug", "easy", "getDrbEasyDrugList", {}),
-    ("htfs_item", "htfs", "getHtfsItem01", {}),
 ]
 
 

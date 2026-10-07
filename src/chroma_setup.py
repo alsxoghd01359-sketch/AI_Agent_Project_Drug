@@ -1,6 +1,6 @@
 """ChromaDB 클라이언트/임베딩 함수 설정.
 
-- 텍스트가 실제로 의미를 담고 있는 컬렉션(drug_products, health_foods)만 OpenAI 임베딩 사용.
+- 텍스트가 실제로 의미를 담고 있는 컬렉션(drug_products)만 OpenAI 임베딩 사용.
 - 나머지(구조화 조회용) 컬렉션은 벡터 유사도 검색을 쓰지 않으므로 더미 임베딩으로
   OpenAI 호출 비용/시간을 아낀다. 조회는 metadata where 필터로만 한다.
 """

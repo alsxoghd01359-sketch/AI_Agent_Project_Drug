@@ -1,6 +1,6 @@
 """data/*.jsonl 원본 데이터를 정리해서 ChromaDB 컬렉션 7개에 적재.
 
-- drug_products, health_foods: 텍스트 설명이 있어서 OpenAI 임베딩(진짜 RAG 대상)
+- drug_products: 텍스트 설명이 있어서 OpenAI 임베딩(진짜 RAG 대상)
 - 나머지: 구조화 조회 전용, 더미 임베딩(비용/시간 절약, where 필터로만 조회)
 
 재실행하면 data/_chroma_progress.json에 기록된 지점부터 이어서 적재합니다.
@@ -160,27 +160,6 @@ def main():
         ingest_records(coll, "drug_products", merged_products(), product_doc_meta, progress, "prod",
                         batch_size=REAL_EMBED_BATCH_SIZE)
 
-    # ---------- 2) health_foods (실제 임베딩) ----------
-    if not progress.get("health_foods", {}).get("done"):
-        def hf_doc_meta(rec):
-            doc = "\n".join(filter(None, [
-                f"제품명: {rec.get('PRDUCT')}",
-                f"주요기능성: {rec.get('MAIN_FNCTN')}" if rec.get("MAIN_FNCTN") else "",
-                f"섭취방법: {rec.get('SRV_USE')}" if rec.get("SRV_USE") else "",
-                f"섭취시 주의사항: {rec.get('INTAKE_HINT1')}" if rec.get("INTAKE_HINT1") else "",
-                f"성상: {rec.get('SUNGSANG')}" if rec.get("SUNGSANG") else "",
-            ]))
-            meta = {
-                "sttemnt_no": rec.get("STTEMNT_NO"),
-                "prduct": rec.get("PRDUCT"),
-                "entrps": rec.get("ENTRPS"),
-            }
-            return doc, meta
-
-        coll = get_or_create_collection(client, "health_foods", real_embedding=True)
-        ingest_records(coll, "health_foods", _read_jsonl("htfs_item"), hf_doc_meta, progress, "hf",
-                        batch_size=REAL_EMBED_BATCH_SIZE)
-
     # ---------- 3) drug_ingredients (더미) ----------
     if not progress.get("drug_ingredients", {}).get("done"):
         def ing_doc_meta(rec):
@@ -258,27 +237,6 @@ def main():
 
         coll = get_or_create_collection(client, "dur_overview", real_embedding=False)
         ingest_records(coll, "dur_overview", _read_jsonl("dur_prdlst"), overview_doc_meta, progress, "ov")
-
-    # ---------- 7) pill_identification (더미) ----------
-    if not progress.get("pill_identification", {}).get("done"):
-        def pill_doc_meta(rec):
-            doc = f"{rec.get('ITEM_NAME')} - {rec.get('DRUG_SHAPE')} {rec.get('COLOR_CLASS1')} " \
-                  f"앞:{rec.get('PRINT_FRONT')} 뒤:{rec.get('PRINT_BACK')}"
-            meta = {
-                "item_seq": rec.get("ITEM_SEQ"),
-                "item_name": rec.get("ITEM_NAME"),
-                "entp_name": rec.get("ENTP_NAME"),
-                "drug_shape": rec.get("DRUG_SHAPE"),
-                "color_class1": rec.get("COLOR_CLASS1"),
-                "color_class2": rec.get("COLOR_CLASS2"),
-                "print_front": rec.get("PRINT_FRONT"),
-                "print_back": rec.get("PRINT_BACK"),
-                "item_image": rec.get("ITEM_IMAGE"),
-            }
-            return doc, meta
-
-        coll = get_or_create_collection(client, "pill_identification", real_embedding=False)
-        ingest_records(coll, "pill_identification", _read_jsonl("pill_ident"), pill_doc_meta, progress, "pill")
 
     print("전체 적재 완료.")
 
