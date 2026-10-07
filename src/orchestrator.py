@@ -629,8 +629,50 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
 
     results = search_by_symptom(symptom, current_med_ingredients=ingredients)
     if results is None:
-        return {"error": f"'{symptom}'은 지원하지 않는 증상 분류입니다."}
-    return {"candidates": results, "data_source": "의약품 제품허가정보 기준"}
+        return {
+            "resolved": True,
+            "answer": f"'{symptom}'은 지원하지 않는 증상 분류입니다. 다른 증상이나 구체적인 약 이름으로 다시 물어봐 주세요.",
+            "note": _ANSWER_NOTE,
+        }
+    if not results:
+        return {
+            "resolved": True,
+            "candidates": results,
+            "answer": f"'{symptom}'에 해당하는 일반의약품 성분을 찾지 못했습니다.\n\n약사나 의사와 상담하시기 바랍니다.\n\n데이터 출처: 의약품 제품허가정보 기준",
+            "note": _ANSWER_NOTE,
+        }
+
+    # 증상 하나에 매칭되는 성분이 수십~수백 개일 수 있다(예: 두통 80개 이상). 전부
+    # bullet로 쏟아내면 읽기 어려우니 상위 몇 개만 보여주고 나머지는 개수만 알린다.
+    # 병용금기로 제외해야 하는 성분은 안전과 직결되므로 cap과 무관하게 항상 보여준다.
+    excluded = [r for r in results if r.get("excluded_reason")]
+    others = [r for r in results if not r.get("excluded_reason")]
+    max_shown = 12
+    shown = excluded + others[:max(0, max_shown - len(excluded))]
+    remaining = len(results) - len(shown)
+
+    bullets = []
+    for r in shown:
+        line = f"- ({r['category']}) {r['ingredient']} — 예: {', '.join(r['examples'])}"
+        if r.get("excluded_reason"):
+            line += f" (주의: {r['excluded_reason']})"
+        bullets.append(line)
+    if remaining > 0:
+        bullets.append(f"- 그 외 {remaining}개 성분이 더 있습니다. 구체적인 성분이나 제품명을 말씀해 주시면 확인해드리겠습니다.")
+    facts = "\n".join(bullets)
+
+    if excluded:
+        names = ", ".join(r["ingredient"] for r in excluded)
+        summary = f"{symptom}에 쓸 수 있는 성분 중 {names}은 현재 복용 중인 약과 병용금기가 등록되어 있어 피해야 합니다."
+    else:
+        summary = f"{symptom}에 쓸 수 있는 일반의약품 성분은 위와 같습니다. 구체적인 제품명을 알려주시면 더 확인해드리겠습니다."
+
+    return {
+        "resolved": True,
+        "candidates": results,
+        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "note": _ANSWER_NOTE,
+    }
 
 
 _FOOD_EVIDENCE_PROMPT = """음식 또는 음료: "{term}"
