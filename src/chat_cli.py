@@ -29,7 +29,11 @@ def main():
             break
 
         reply = conversation.send(user_input)
-        print(f"\n[도우미] {reply}")
+        print(f"\n[도우미] {reply['text']}")
+        if reply.get("footer"):
+            # 상담 권유·안내·데이터 출처처럼 거의 고정된 문구는 흐리게(ANSI dim) 표시해서
+            # 본문과 구분한다. 터미널이 ANSI를 지원하지 않으면 그냥 평문으로 보인다.
+            print(f"\033[2m{reply['footer']}\033[0m")
 
 
 if __name__ == "__main__":

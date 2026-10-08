@@ -490,10 +490,12 @@ def _tool_check_drug_interactions(product_names):
         )
         summary = "같은 제품을 중복해서 드시는 것이므로, 병용이 아니라 과다복용에 주의해야 합니다."
         rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
+        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
         return {
             "same_product_repeated": True,
             "item_name": detail.get("item_name"),
-            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
+            "answer": answer,
+            "footer": footer,
             "note": _ANSWER_NOTE,
         }
 
@@ -510,7 +512,7 @@ def _tool_check_drug_interactions(product_names):
         r.pop("dur_cautions", None)
     facts = _interaction_facts(result)
     summary = _interaction_summary(result)
-    result["answer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준", closing=rx_closing)
+    result["answer"], result["footer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준", closing=rx_closing)
     result["note"] = _ANSWER_NOTE
     return result
 
@@ -605,7 +607,7 @@ def _tool_get_drug_info(product_name, question="", build_answer=True):
         # get_age_dur_info처럼 dur_cautions 등 원본 필드만 필요한 내부 호출.
         # 매번 답변 문장까지 조립하면 search_paragraphs·LLM 호출이 낭비된다.
         return detail
-    detail["answer"] = _build_drug_info_answer(item_seq, detail, question, detail["data_source"])
+    detail["answer"], detail["footer"] = _build_drug_info_answer(item_seq, detail, question, detail["data_source"])
     detail["note"] = _ANSWER_NOTE
     return detail
 
@@ -627,10 +629,12 @@ def _tool_get_age_dur_info(product_name, question):
         for d in entries
     )
     rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
+    answer, footer = _assemble_answer(facts, None, detail["data_source"], closing=rx_closing)
     return {
         "resolved": True,
         "item_name": detail["item_name"],
-        "answer": _assemble_answer(facts, None, detail["data_source"], closing=rx_closing),
+        "answer": answer,
+        "footer": footer,
         "note": _ANSWER_NOTE,
     }
 
@@ -654,7 +658,8 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
         return {
             "resolved": True,
             "candidates": results,
-            "answer": f"'{symptom}'에 해당하는 일반의약품 성분을 찾지 못했습니다.\n\n약사나 의사와 상담하시기 바랍니다.\n\n{_data_source_line('의약품 제품허가정보 기준')}",
+            "answer": f"'{symptom}'에 해당하는 일반의약품 성분을 찾지 못했습니다.",
+            "footer": f"약사나 의사와 상담하시기 바랍니다.\n\n{_data_source_line('의약품 제품허가정보 기준')}",
             "note": _ANSWER_NOTE,
         }
 
@@ -683,10 +688,12 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     else:
         summary = f"{symptom}에 쓸 수 있는 일반의약품 성분은 위와 같습니다. 구체적인 제품명을 알려주시면 더 확인해드리겠습니다."
 
+    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준")
     return {
         "resolved": True,
         "candidates": results,
-        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준"),
+        "answer": answer,
+        "footer": footer,
         "note": _ANSWER_NOTE,
     }
 
@@ -935,27 +942,25 @@ def _data_source_line(data_source):
 
 
 def _assemble_answer(facts, summary, data_source, closing=None):
-    """최종 답변 문자열을 Python에서 전부 완성한다. facts/summary를 따로 주고 메인 LLM에게
-    조립을 맡기면, 라벨을 **굵게**로 바꾸거나 문단을 빠뜨리거나 근거에 없는 결론("운전은
-    가능하다" 등)을 덧붙이는 경우가 있었다. 조립까지 끝낸 문자열 하나를 그대로 출력하게
-    하면 이런 흔들림이 없다."""
+    """답변을 본문(body)과 footer로 나눠서 (body, footer) 튜플로 돌려준다.
+    facts/summary를 따로 주고 메인 LLM에게 조립을 맡기면, 라벨을 **굵게**로 바꾸거나
+    문단을 빠뜨리거나 근거에 없는 결론("운전은 가능하다" 등)을 덧붙이는 경우가
+    있었다. 조립까지 끝낸 문자열을 그대로 출력하게 하면 이런 흔들림이 없다.
+    body는 조회된 사실·정리처럼 근거에 따라 매번 달라지는 핵심 내용이고, footer는
+    상담 권유·전문의약품 안내·데이터 출처처럼 거의 고정된 문구다. Streamlit에서
+    footer를 작은 회색 글씨로 따로 보여주기 위해 나눈다."""
+    body_parts = ["[조회된 사실]", facts]
+    if summary:
+        body_parts += ["", "[정리]", summary]
+    body = "\n".join(body_parts)
+
     closings = [c for c in ([closing] if isinstance(closing, str) else (closing or [])) if c]
     # 전문의약품 안내 자체가 "처방한 의사·약사의 지침을 따르라"는 상담 권유를 이미
     # 포함하므로, 그때는 일반적인 "약사나 의사와 상담하시기 바랍니다."를 또 붙이지 않는다.
     tail = [] if any("처방 받은 지침을 따르세요" in c for c in closings) else ["약사나 의사와 상담하시기 바랍니다."]
     tail += closings
-    tail_text = " ".join(tail)
-
-    # [조회된 사실]의 bullet은 항목별로 분리된 근거라 그대로 두지만, 그 아래 정리·
-    # 상담 권유·안내 문구는 전부 결론에 해당하는 말이라 blank line으로 뚝뚝 끊어
-    # 보여주지 않고 한 문단으로 자연스럽게 이어 쓴다.
-    parts = ["[조회된 사실]", facts, ""]
-    if summary:
-        parts += ["[정리]", f"{summary} {tail_text}".strip()]
-    else:
-        parts.append(tail_text)
-    parts += ["", _data_source_line(data_source)]
-    return "\n".join(parts)
+    footer = " ".join(tail) + "\n\n" + _data_source_line(data_source)
+    return body, footer
 
 
 _PRESCRIPTION_NOTE = (
@@ -1054,10 +1059,12 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
             return _no_evidence_result(item_name, closing=rx_closing)
         facts = _render_facts(conditions_out)
         summary = _make_summary(facts)
+        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
         return {
             "resolved": True,
             "item_name": item_name,
-            "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
+            "answer": answer,
+            "footer": footer,
             "conditions": conditions_out,
             "relevant_paragraphs": found,
             "note": _ANSWER_NOTE,
@@ -1080,10 +1087,12 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         return _no_evidence_result(item_name, closing=rx_closing)
     facts = _bullets_to_md(_render_bullets([p["text"] for p in picked]))
     summary = _make_summary(facts)
+    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
     return {
         "resolved": True,
         "item_name": item_name,
-        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
+        "answer": answer,
+        "footer": footer,
         "relevant_paragraphs": picked,
         "note": _ANSWER_NOTE,
     }
@@ -1094,12 +1103,14 @@ def _no_evidence_result(item_name, closing=None):
     sentence = (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
                 "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
                 "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다.")
-    text = f"{sentence} {closing}".strip() if closing else sentence
+    footer = f"{closing}\n\n" if closing else ""
+    footer += _data_source_line("의약품 제품허가정보 기준")
     return {
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": [],
-        "answer": f"{text}\n\n{_data_source_line('의약품 제품허가정보 기준')}",
+        "answer": sentence,
+        "footer": footer,
         "note": _ANSWER_NOTE,
     }
 
@@ -1122,10 +1133,12 @@ def _tool_get_overdose_info(product_name):
         return _no_evidence_result(item_name, closing=rx_closing)
     facts = _plain_bullets(overdose_sentences, "과량투여")
     summary = _make_summary(facts)
+    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
     return {
         "resolved": True,
         "item_name": item_name,
-        "answer": _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing),
+        "answer": answer,
+        "footer": footer,
         "note": _ANSWER_NOTE,
     }
 
@@ -1170,10 +1183,14 @@ class Conversation:
     def __init__(self):
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    def send(self, user_message: str, max_tool_rounds: int = 5) -> str:
+    def send(self, user_message: str, max_tool_rounds: int = 5) -> dict:
+        """반환값은 {"text": 핵심 답변, "footer": 상담 권유·안내·데이터 출처(없으면
+        None)}다. Streamlit 등에서 footer를 본문과 다르게(작은 회색 글씨로) 보여줄
+        수 있게 나눈다. 대화 기록(self.messages)에는 둘을 합친 전체 텍스트를
+        남겨서, 다음 턴에 모델이 이전에 말한 내용을 전부 보게 한다."""
         emergency = detect_emergency(user_message)
         if emergency:
-            return emergency["message"]
+            return {"text": emergency["message"], "footer": None}
 
         self.messages.append({"role": "user", "content": user_message})
         last_lifestyle_result = None
@@ -1200,12 +1217,13 @@ class Conversation:
             if not msg.tool_calls:
                 content = msg.content
                 self.messages.append({"role": "assistant", "content": content})
+                footer = None
                 if SCORE_DEBUG:
                     cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
-                    content += _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, content)
+                    debug = _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, content)
                     grades = _auto_grade(user_message, last_tool_name, last_tool_result, content)
-                    content += _build_grading_block(grades)
-                return content
+                    footer = (debug + _build_grading_block(grades)).strip() or None
+                return {"text": content, "footer": footer}
 
             self.messages.append(msg)
             for tool_call in msg.tool_calls:
@@ -1261,21 +1279,26 @@ class Conversation:
                 })
 
             if len(msg.tool_calls) == 1 and isinstance(last_tool_result, dict) and "answer" in last_tool_result:
-                # 도구가 이미 answer를 완성해 줬다. 한 번 더 모델을 불러 "그대로 출력"을
-                # 시키면, 모델이 옮겨 적는 과정에서 줄바꿈이나 라벨이 가끔 흔들렸다.
-                # 모델에게 다시 쓰게 하지 않고 Python이 그 문자열로 바로 끝낸다.
-                content = last_tool_result["answer"]
-                self.messages.append({"role": "assistant", "content": content})
+                # 도구가 이미 answer(+footer)를 완성해 줬다. 한 번 더 모델을 불러
+                # "그대로 출력"을 시키면, 모델이 옮겨 적는 과정에서 줄바꿈이나 라벨이
+                # 가끔 흔들렸다. 모델에게 다시 쓰게 하지 않고 Python이 그 문자열로
+                # 바로 끝낸다.
+                text = last_tool_result["answer"]
+                footer = last_tool_result.get("footer")
+                combined = f"{text}\n\n{footer}" if footer else text
+                self.messages.append({"role": "assistant", "content": combined})
                 if SCORE_DEBUG:
-                    cited_nums = _detect_citations(user_message, last_lifestyle_result, content)
-                    content += _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, content)
-                    grades = _auto_grade(user_message, last_tool_name, last_tool_result, content)
-                    content += _build_grading_block(grades)
-                return content
+                    cited_nums = _detect_citations(user_message, last_lifestyle_result, combined)
+                    debug = _build_score_debug_block(last_tool_name, last_tool_result, last_lifestyle_result, cited_nums, combined)
+                    grades = _auto_grade(user_message, last_tool_name, last_tool_result, combined)
+                    debug += _build_grading_block(grades)
+                    footer = f"{footer}\n\n{debug}" if footer else debug
+                return {"text": text, "footer": footer}
 
-        return "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다."
+        return {"text": "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다.", "footer": None}
 
 
-def chat(user_message: str, max_tool_rounds: int = 5) -> str:
-    """대화 기록이 필요 없는 단발성 질문용 편의 함수. 멀티턴 대화는 Conversation을 쓴다."""
+def chat(user_message: str, max_tool_rounds: int = 5) -> dict:
+    """대화 기록이 필요 없는 단발성 질문용 편의 함수. 반환값은 Conversation.send()와
+    같다({"text":, "footer":}). 멀티턴 대화는 Conversation을 쓴다."""
     return Conversation().send(user_message, max_tool_rounds=max_tool_rounds)
