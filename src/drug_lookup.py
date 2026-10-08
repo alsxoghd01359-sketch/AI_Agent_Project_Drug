@@ -406,17 +406,20 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
         # 복합제가 다 섞여 있음) 대표 제품 하나만 물어보면 나머지 제품이 묻혀버리므로
         # 전부 나열한다. LLM한테 이 규칙을 글로만 지시하면 안정적으로 안 지키는 걸
         # 확인해서, 문장 자체를 코드에서 확정한다.
+        # 제품명 뒤에 붙은 "(주성분)" 표기는 식약처 원본 데이터 그대로지만, 되묻는
+        # 목록에서는 사용자가 실제로 아는 제품명만 보이는 게 알아보기 쉽다. 또한 제품이
+        # 여럿이면 한 줄에 쉼표로 늘어놓지 않고 한 줄씩 나열해서 읽기 쉽게 한다.
         questions = []
         for g in candidate_groups:
-            if len(g["products"]) == 1:
-                questions.append(f"{g['ingredients'][0]} 계열의 {g['products'][0]}을 말씀하시는 건가요?")
+            display_products = [_strip_brackets(n) for n in g["products"]]
+            if len(display_products) == 1:
+                questions.append(f"{g['ingredients'][0]} 계열의 {display_products[0]}을 말씀하시는 건가요?")
             else:
-                product_list = ", ".join(g["products"])
+                product_lines = "\n".join(f"- {n}" for n in display_products)
                 questions.append(
-                    f"{g['ingredients'][0]} 계열에는 {product_list} 등 여러 제품이 있습니다. "
-                    "그중 어떤 제품을 말씀하시는 건가요?"
+                    f"{g['ingredients'][0]} 계열에는 다음 제품들이 있습니다. 그중 어떤 제품을 말씀하시는 건가요?\n{product_lines}"
                 )
-        result["clarification_question"] = " ".join(questions)
+        result["clarification_question"] = "\n\n".join(questions)
 
     return result
 
