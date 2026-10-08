@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -954,13 +955,14 @@ def _render_facts(conditions_out):
     (맡기면 근거가 있어도 '관련 없음'이라고 잘못 쓰는 경우가 있었다). 조건마다 따로 조립하면
     가독성을 위해 조건 제목을 항상 붙일 수 있고, 한 조건의 문단이 다른 조건의 설명에 섞여
     들어가지 않는다."""
-    parts = []
-    for c in conditions_out:
+    def _render_one(c):
         if not c["evidence"]:
-            parts.append(f"**{c['condition']}**\n- 이 조건과 관련된 주의사항은 없습니다.")
-            continue
+            return f"**{c['condition']}**\n- 이 조건과 관련된 주의사항은 없습니다."
         bullets = _render_bullets(c["evidence"])
-        parts.append(f"**{c['condition']}**\n{_bullets_to_md(bullets)}")
+        return f"**{c['condition']}**\n{_bullets_to_md(bullets)}"
+
+    with ThreadPoolExecutor(max_workers=len(conditions_out)) as pool:
+        parts = list(pool.map(_render_one, conditions_out))
     return "\n\n".join(parts)
 
 
@@ -989,12 +991,21 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     conditions = extract_conditions(question, CHAT_MODEL)
     if len(conditions) >= 2:
         # 조건마다 따로 근거를 판정한다. 근거가 없는 조건은 그 조건만 없다고 말한다.
-        conditions_out = []
-        found = []
-        for c in conditions:
+        # 조건끼리는 서로 의존하지 않으므로(검색 -> 선별 -> 음식 확인 전부 조건
+        # 하나짜리 데이터만 본다) 순서대로 돌리지 않고 동시에 돌려서 기다리는
+        # 시간을 조건 개수만큼 늘리지 않는다.
+        def _evidence_for(c):
             raw = search_paragraphs(item_seq, field, c, top_k=8)
             paras = _pick_with_food_check(c, raw)
             paras = _attach_body(paras, _get_paragraphs(item_seq, field))
+            return c, paras
+
+        with ThreadPoolExecutor(max_workers=len(conditions)) as pool:
+            results = list(pool.map(_evidence_for, conditions))
+
+        conditions_out = []
+        found = []
+        for c, paras in results:
             if paras:
                 found.extend(paras)
             conditions_out.append({
