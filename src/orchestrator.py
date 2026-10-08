@@ -690,35 +690,39 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     }
 
 
-_FOOD_CROSS_PROMPT = """복용자 상황: "{condition}"
+_RELEVANCE_FILTER_PROMPT = """복용자 상황: "{condition}"
 
-1) 이 상황이 음식이나 음료에 관한 것인지 판단하세요. 음식·음료가 아니면(예: 운전, 질환, 나이, 다른 약 등) "해당없음"이라고만 답하세요.
-2) 음식·음료에 관한 것이면, 아래 문단 중에 그 음식·음료를 직접 다루는 문단이 있는지 판단하세요.
-   같은 뜻으로 쓰인 말도 인정합니다. 예: 술은 알코올, 커피는 카페인 등. "알코올섭취"는 술(음료)에 대한 내용이므로 있는 것으로 봅니다.
-   약의 성분, 부형제, 수유 중 이행 같은 내용은 음식 자체에 대한 내용이 아닙니다.
-   직접 다루는 문단이 있으면 "YES", 없으면 "NO"만 답하세요.
-
-"해당없음", "YES", "NO" 중 하나만 답하세요.
+이 상황이 구체적으로 묻는 대상이 무엇인지 생각하세요(예: 운전, 콩팥, 커피, 자몽주스, 나이 등).
+아래 문단 중에서 그 대상을 주된 내용으로 다루는 문단의 번호만 쉼표로 적으세요.
+같은 뜻으로 쓰인 말도 인정합니다. 예: 콩팥=신장=신기능, 술=알코올, 커피=카페인.
+다른 약물이나 물질(알코올, 다른 약 등)과의 상호작용을 다루는 문단은, 상황이 그 약물·물질 자체를 묻는 게 아니라면 제외하세요.
+예: "운전해도 되나요"에는 운전·기계 사용 자체를 다루는 문단만 포함합니다. 알코올과 함께 복용했을 때 혈압이나 어지럼증이 변한다는 문단은, 그 문단의 진짜 주제가 알코올과의 상호작용이므로, 운전 상황에는 포함하지 않습니다(알코올에 대해 물을 때만 포함합니다).
+약의 성분, 부형제, 수유 중 이행 같은 내용도 음식·음료 자체를 다루는 것이 아니므로 제외합니다.
+해당하는 문단이 없으면 "없음"이라고만 답하세요.
 
 [문단]
 {paragraphs}
 """
 
 
-def _food_cross_check(condition, paragraphs):
-    """한 번의 호출로 "이 상황이 음식·음료에 관한 것인지"와 "문단이 그 음식을
-    다루는지"를 같이 판단한다. 따로 부르면(이전에는 "음식 이름 추출" + "성분/음식
-    분류" + "근거 확인" 최대 3번) 조건마다 호출이 늘어 느려진다."""
-    text = "\n".join(f"- {p}" for p in paragraphs) if paragraphs else "(문단 없음)"
+def _relevance_filter(condition, paragraphs):
+    """문단 목록 중 조건이 실제로 묻는 대상을 주된 내용으로 다루는 것만 골라
+    인덱스로 돌려준다. _pick_for_condition이 상황과 다른 대상을 다루는 문단을
+    잘못 고르는 경우가 반복적으로 재현됐다(예: "운전" 조건에 음주 문단, "고추"
+    조건에 음주 문단). 처음에는 "그 대상을 다루는 문단이 있는가"를 묶음으로
+    물었는데, 맞는 문단과 틀린 문단이 같은 묶음에 있으면 묶음 전체가 YES로
+    통과해서 틀린 문단이 그대로 섞여 나왔다. 문단마다 번호로 다시 골라야 이
+    문제가 없다."""
+    if not paragraphs:
+        return []
+    text = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(paragraphs))
     resp = _client.chat.completions.create(
         model=CHAT_MODEL,
         temperature=0,
-        messages=[{"role": "user", "content": _FOOD_CROSS_PROMPT.format(condition=condition, paragraphs=text)}],
+        messages=[{"role": "user", "content": _RELEVANCE_FILTER_PROMPT.format(condition=condition, paragraphs=text)}],
     )
-    answer = (resp.choices[0].message.content or "").strip()
-    if "해당없음" in answer:
-        return "not_food"
-    return "yes" if answer.upper().startswith("Y") else "no"
+    numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
+    return [i for i in range(len(paragraphs)) if (i + 1) in numbers]
 
 
 
@@ -752,22 +756,27 @@ def _pick_for_condition(condition, paragraphs):
     return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
 
 
-def _pick_with_food_check(condition, raw):
-    """조건에 맞는 문단을 고르고, 음식·음료 조건이면 고른 문단이 실제로 그 음식을
-    다루는지 다시 확인한다. _pick_for_condition이 음식과 무관한 문단(예: "고추"
-    조건에 음주 관련 문단)을 잘못 고르는 경우가 재현됐는데, 한 번 음식 근거
-    판정을 통과하지 못하면 걸러낼 길이 없었다(이전에는 마지막 LLM 응답 단계에서
-    가끔 걸러졌지만, 그 단계를 없앤 뒤로는 그대로 새어 나갔다)."""
+def _pick_with_relevance_check(condition, raw):
+    """조건에 맞는 문단을 고르고, 고른 문단이 조건이 실제로 묻는 대상을 다루는지
+    다시 확인한다. _pick_for_condition이 상황과 다른 대상을 다루는 문단을 잘못
+    고르는 경우가 재현됐는데(예: "운전" 조건에 음주 문단, "고추" 조건에 음주
+    문단), 한 번 판정을 통과하지 못하면 걸러낼 길이 없었다(이전에는 마지막 LLM
+    응답 단계에서 가끔 걸러졌지만, 그 단계를 없앤 뒤로는 그대로 새어 나갔다).
+    고른 게 없을 때는 상위 문단 중에 실제로 대상을 다루는 게 있는지 봐서,
+    _pick_for_condition이 너무 엄격했던 경우를 보완한다."""
     picked = _pick_for_condition(condition, raw)
-    check_source = picked or raw
-    if not check_source:
-        return picked
-    result = _food_cross_check(condition, [p["text"] for p in check_source[:3]])
-    if result == "not_food":
-        return picked
     if picked:
-        return [] if result == "no" else picked
-    return raw[:2] if result == "yes" else []
+        # 이미 고른 문단 전체를 다시 확인한다(일부만 보면 뒤쪽에 있는 정상적인
+        # 문단을 잘라낼 수 있다).
+        keep = _relevance_filter(condition, [p["text"] for p in picked])
+        return [picked[i] for i in keep]
+    if not raw:
+        return []
+    # 고른 게 없으면 상위 몇 개만 느슨하게 다시 본다(_pick_for_condition이
+    # 너무 엄격했던 경우를 보완하는 마지막 fallback이라 비용을 제한한다).
+    check_source = raw[:3]
+    keep = _relevance_filter(condition, [p["text"] for p in check_source])
+    return [check_source[i] for i in keep][:2]
 
 
 def _attach_body(picked, all_paragraphs):
@@ -996,7 +1005,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         # 시간을 조건 개수만큼 늘리지 않는다.
         def _evidence_for(c):
             raw = search_paragraphs(item_seq, field, c, top_k=8)
-            paras = _pick_with_food_check(c, raw)
+            paras = _pick_with_relevance_check(c, raw)
             paras = _attach_body(paras, _get_paragraphs(item_seq, field))
             return c, paras
 
@@ -1031,7 +1040,12 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         ud = search_paragraphs(item_seq, "UD", question, top_k=4)
         seen = {p["text"] for p in ud}
         paragraphs = ud + [p for p in paragraphs if p["text"] not in seen]
-    picked = _pick_with_food_check(question, paragraphs)
+    # 조건 선별에는 원문 질문 그대로("에나폰정10밀리그램 먹을 때 고추 마셔도 되나요?")가
+    # 아니라 extract_conditions가 뽑아낸 깨끗한 조건 문장을 쓴다. 약 이름과 "먹을 때"
+    # 같은 말이 섞여 있으면, 음식과 무관한 "약물 등 복용 시 주의" 문단을 음식 조건에
+    # 맞는 것처럼 잘못 고르는 경우가 재현됐다(조건별 경로는 이미 깨끗한 문장을 쓴다).
+    condition_text = conditions[0] if conditions else question
+    picked = _pick_with_relevance_check(condition_text, paragraphs)
     picked = _attach_body(picked, _get_paragraphs(item_seq, field))
     if not picked:
         return _no_evidence_result(item_name, closing=rx_closing)
