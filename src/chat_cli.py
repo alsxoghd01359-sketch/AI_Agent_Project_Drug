@@ -13,6 +13,7 @@ def main():
     print("AI 복약 정보 도우미입니다. 데이터를 불러오는 중입니다...")
     warmup()
     print("약에 대해 궁금한 점을 물어보세요. (종료: 종료/exit/quit)")
+    print("⚠️  AI 복약 정보 도우미는 의사가 아닙니다. 정확한 진단과 처방은 의사나 약사와 상담하세요.")
     conversation = Conversation()
 
     while True:

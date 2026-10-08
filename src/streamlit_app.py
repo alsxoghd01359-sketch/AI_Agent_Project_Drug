@@ -44,15 +44,20 @@ if "conversation" not in st.session_state:
 if "history" not in st.session_state:
     st.session_state.history = []  # [{"role": "user"|"assistant", "text": str, "footer": str|None}]
 
+# st.chat_input은 스크립트에서 어디에 적든 항상 화면 맨 아래에 고정 렌더링된다
+# (Streamlit의 특수 동작). 그래서 여기서 먼저 입력값만 받아두고, 화면에 보여줄
+# 내용(대화 내역 + 안내문)은 이 아래에서 순서대로 쌓는다 — 안내문이 chat_input보다
+# 먼저 호출돼도, 실제로는 입력창이 항상 그 아래(화면 맨 아래)에 고정된다.
+user_input = st.chat_input("약에 대해 궁금한 점을 물어보세요")
+
 for msg in st.session_state.history:
     with st.chat_message(msg["role"]):
         st.markdown(_md_safe(msg["text"]))
         if msg.get("footer"):
-            # 상담 권유·전문의약품 안내·데이터 출처처럼 거의 고정된 문구는 본문보다
-            # 작고 흐린 글씨(st.caption)로 따로 보여준다.
+            # 전문의약품 안내·병용금기 등록 안내·데이터 출처처럼 그 답변에만 해당하는
+            # 부가 정보는 본문보다 작고 흐린 글씨(st.caption)로 따로 보여준다.
             st.caption(_md_safe(msg["footer"]))
 
-user_input = st.chat_input("약에 대해 궁금한 점을 물어보세요")
 if user_input:
     st.session_state.history.append({"role": "user", "text": user_input, "footer": None})
     with st.chat_message("user"):
@@ -67,3 +72,8 @@ if user_input:
     st.session_state.history.append(
         {"role": "assistant", "text": reply["text"], "footer": reply.get("footer")}
     )
+
+# 상담 권유를 답변마다 반복하는 대신, 대화 내역 맨 아래(= 질문·답변이 쌓일수록 계속
+# 밀려 내려가는 위치)에 고정 안내문으로 한 번만 보여준다.
+st.divider()
+st.caption("⚠️ AI 복약 정보 도우미는 의사가 아닙니다. 정확한 진단과 처방은 의사나 약사와 상담하세요.")

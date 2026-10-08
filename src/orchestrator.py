@@ -983,12 +983,13 @@ def _assemble_answer(facts, summary, data_source, closing=None):
         body_parts += ["", "[정리]", summary]
     body = "\n".join(body_parts)
 
+    # "약사나 의사와 상담하시기 바랍니다"는 더 이상 매 답변마다 붙이지 않는다 — 매번
+    # 반복되면 부자연스럽고, 채팅 UI 하단에 고정 안내문으로 한 번만 보여주는 쪽이
+    # 낫다(화면 쪽 구현). 여기서는 특정 상황에서만 의미 있는 안내(전문의약품,
+    # 병용금기 등록 등)만 footer에 남긴다.
     closings = [c for c in ([closing] if isinstance(closing, str) else (closing or [])) if c]
-    # 전문의약품 안내 자체가 "처방한 의사·약사의 지침을 따르라"는 상담 권유를 이미
-    # 포함하므로, 그때는 일반적인 "약사나 의사와 상담하시기 바랍니다."를 또 붙이지 않는다.
-    tail = [] if any("처방 받은 지침을 따르세요" in c for c in closings) else ["약사나 의사와 상담하시기 바랍니다."]
-    tail += closings
-    footer = " ".join(tail) + "\n\n" + _data_source_line(data_source)
+    footer = " ".join(closings)
+    footer = (footer + "\n\n" + _data_source_line(data_source)) if footer else _data_source_line(data_source)
     return body, footer
 
 
