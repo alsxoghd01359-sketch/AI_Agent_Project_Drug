@@ -11,6 +11,17 @@ from orchestrator import Conversation, warmup
 st.set_page_config(page_title="AI 복약 정보 도우미", page_icon="💊")
 
 
+def _md_safe(text):
+    """조회된 데이터 원문의 ~(물결, "1~2정"처럼 범위 표시)·`(백틱)·_(밑줄)이 마크다운
+    문법(취소선·코드·기울임)으로 잘못 해석되는 걸 막는다. "1~2정"이 "1"에 취소선이
+    그어진 것처럼 보이는 문제가 실제로 있었다. 우리가 직접 쓰는 서식(글머리표 "- ",
+    굵게 "**..**", "[...]" 라벨)에는 이 세 글자를 쓰지 않으므로 그대로 이스케이프해도
+    안전하다."""
+    for ch in ("\\", "`", "_", "~"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 @st.cache_resource
 def _warmup():
     # drug_lookup/paragraph_search/name_match의 지연 로딩 데이터를 앱 시작 시 한 번만
@@ -35,24 +46,24 @@ if "history" not in st.session_state:
 
 for msg in st.session_state.history:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["text"])
+        st.markdown(_md_safe(msg["text"]))
         if msg.get("footer"):
             # 상담 권유·전문의약품 안내·데이터 출처처럼 거의 고정된 문구는 본문보다
             # 작고 흐린 글씨(st.caption)로 따로 보여준다.
-            st.caption(msg["footer"])
+            st.caption(_md_safe(msg["footer"]))
 
 user_input = st.chat_input("약에 대해 궁금한 점을 물어보세요")
 if user_input:
     st.session_state.history.append({"role": "user", "text": user_input, "footer": None})
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.markdown(_md_safe(user_input))
 
     with st.chat_message("assistant"):
         with st.spinner("데이터를 조회하는 중입니다..."):
             reply = st.session_state.conversation.send(user_input)
-        st.markdown(reply["text"])
+        st.markdown(_md_safe(reply["text"]))
         if reply.get("footer"):
-            st.caption(reply["footer"])
+            st.caption(_md_safe(reply["footer"]))
     st.session_state.history.append(
         {"role": "assistant", "text": reply["text"], "footer": reply.get("footer")}
     )

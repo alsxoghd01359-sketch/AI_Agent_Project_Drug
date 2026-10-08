@@ -534,41 +534,70 @@ def _dur_type_for_question(question):
     return None
 
 
+_INFO_SCOPE_KEYWORDS = {
+    "ingredients": ("성분", "주성분", "원료"),
+    "efficacy": ("효능", "효과"),
+    "usage": ("용법", "용량", "복용법", "몇 알", "몇 정", "어떻게 먹", "먹는 법"),
+}
+
+
+def _info_scope(question):
+    """질문이 성분·효능효과·용법용량 중 하나만 콕 집어 물었으면 그 범위만 보여주고,
+    범위를 특정하지 않았거나("먹어도 되나요" 등 안전을 묻는 질문) 범위 키워드가 없으면
+    None(전체 표시)을 돌려준다. "성분이 뭐야"처럼 단순 정보 질문에 경고·DUR까지 전부
+    보여주면 묻지 않은 걸 끼워 넣는 셈이라 불필요하게 느껴진다."""
+    for scope, keywords in _INFO_SCOPE_KEYWORDS.items():
+        if any(k in question for k in keywords):
+            return scope
+    return None
+
+
 def _build_drug_info_answer(item_seq, detail, question, data_source):
     """get_drug_info 답변을 전부 Python에서 조립한다. 성분/효능/용법용량은 이미 깨끗한
     필드라 그대로 bullet로 쓰고, 사용상주의사항은 질문과 관련된 문단만 찾아 조항 이름을
     붙인다. dur_cautions는 질문이 특정 유형을 물었으면 그 유형만, 아니면 전체를 보여준다
     (어떤 유형을 보여줄지 LLM이 매번 다시 판단하게 하면 흔들린다)."""
+    scope = _info_scope(question)
     basic = []
     if detail.get("cancel_name") and detail["cancel_name"] != "정상":
+        # 판매 중지 여부는 뭘 물었든 항상 먼저 알린다(안전과 직결).
         basic.append(
             f"- (판매 상태) 이 제품은 {detail.get('cancel_date')}자로 {detail['cancel_name']} 처리되어 "
             "더 이상 정상적으로 판매되지 않습니다. 복용 중이라면 약사나 의사와 상담하세요."
         )
-    if detail.get("ingredients"):
+    if scope in (None, "ingredients") and detail.get("ingredients"):
         basic.append(f"- (성분) {', '.join(detail['ingredients'])}")
-    basic += _split_field("효능효과", detail.get("효능효과") or "")
-    basic += _split_field("용법용량", detail.get("용법용량") or "")
+    if scope in (None, "ingredients", "efficacy"):
+        basic += _split_field("효능효과", detail.get("효능효과") or "")
+    if scope in (None, "usage"):
+        basic += _split_field("용법용량", detail.get("용법용량") or "")
 
-    paragraphs = search_paragraphs(item_seq, "NB", question or detail.get("item_name") or "", top_k=5)
-    caution_md = _bullets_to_md(_render_bullets([p["text"] for p in paragraphs])) if paragraphs else ""
-
+    # 사용상주의사항 원문 검색과 DUR 전체 목록은 "먹어도 되나요"처럼 범위를 특정하지
+    # 않은 안전 질문에만 보여준다. "성분이 뭐야"처럼 단순 정보 질문에 경고·DUR까지
+    # 끼워 넣으면 묻지 않은 걸 같이 알려주는 셈이라 불필요하게 느껴진다. 다만 질문이
+    # 특정 DUR 유형(예: 용량주의)을 콕 집었으면 범위를 좁혀 물은 것과 같으니 보여준다.
     dtype = _dur_type_for_question(question)
-    dur_cautions = detail.get("dur_cautions", [])
-    relevant = [d for d in dur_cautions if d.get("type") == dtype] if dtype else dur_cautions
-    dur_lines = [
-        f"- (DUR: {d['type']}) " + (
-            d.get("content") or f"{d['type']}에 대한 주의가 필요한 성분/품목으로 등록되어 있으나 구체적인 문구는 없습니다."
-        )
-        for d in relevant
-    ]
-    if dtype and not relevant:
-        dur_lines.append(f"- (DUR: {dtype}) 등록된 정보가 없습니다.")
+    caution_md = ""
+    dur_lines = []
+    if scope is None or dtype:
+        if scope is None:
+            paragraphs = search_paragraphs(item_seq, "NB", question or detail.get("item_name") or "", top_k=5)
+            caution_md = _bullets_to_md(_render_bullets([p["text"] for p in paragraphs])) if paragraphs else ""
+        dur_cautions = detail.get("dur_cautions", [])
+        relevant = [d for d in dur_cautions if d.get("type") == dtype] if dtype else dur_cautions
+        dur_lines = [
+            f"- (DUR: {d['type']}) " + (
+                d.get("content") or f"{d['type']}에 대한 주의가 필요한 성분/품목으로 등록되어 있으나 구체적인 문구는 없습니다."
+            )
+            for d in relevant
+        ]
+        if dtype and not relevant:
+            dur_lines.append(f"- (DUR: {dtype}) 등록된 정보가 없습니다.")
 
     facts = "\n".join(filter(None, ["\n".join(basic), caution_md, "\n".join(dur_lines)])) or "등록된 정보가 없습니다."
     summary = _make_summary(facts)
     closings = []
-    if detail.get("has_interaction_data"):
+    if scope is None and detail.get("has_interaction_data"):
         closings.append(
             "이 약은 특정 약과 함께 복용 시 주의가 필요한 조합이 등록되어 있습니다. "
             "현재 복용 중인 다른 약이 있으면 알려주시면 추가로 확인해드리겠습니다."
