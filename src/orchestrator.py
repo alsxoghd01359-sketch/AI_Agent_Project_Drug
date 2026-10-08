@@ -9,6 +9,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -653,7 +654,7 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
         return {
             "resolved": True,
             "candidates": results,
-            "answer": f"'{symptom}'에 해당하는 일반의약품 성분을 찾지 못했습니다.\n\n약사나 의사와 상담하시기 바랍니다.\n\n데이터 출처: 의약품 제품허가정보 기준",
+            "answer": f"'{symptom}'에 해당하는 일반의약품 성분을 찾지 못했습니다.\n\n약사나 의사와 상담하시기 바랍니다.\n\n{_data_source_line('의약품 제품허가정보 기준')}",
             "note": _ANSWER_NOTE,
         }
 
@@ -905,6 +906,34 @@ _ANSWER_NOTE = (
 )
 
 
+def _file_date(path):
+    """파일을 마지막으로 받아온 날짜(수정 시각)를 YYYY-MM-DD로. 식약처 API의 레코드별
+    갱신일이 아니라, 이 로컬 스냅샷을 언제 내려받았는지를 뜻한다 — 정적 데이터라
+    식약처가 그 뒤 갱신해도 반영되지 않을 수 있다는 걸 사용자가 알 수 있게 한다."""
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
+    except OSError:
+        return None
+
+
+_PRMSN_UPDATED = _file_date("data/drug_prdt_prmsn_list.jsonl")
+_DUR_UPDATED = _file_date("data/dur_usjnt_taboo.jsonl")
+
+
+def _data_source_line(data_source):
+    """'데이터 출처: ...' 줄에 갱신일을 붙인다. data_source 문구에 "제품허가정보"나
+    "안전사용서비스"가 있으면 그에 맞는 날짜를, 둘 다 없으면 제품허가정보 날짜를 쓴다."""
+    dates = set()
+    if "제품허가정보" in data_source and _PRMSN_UPDATED:
+        dates.add(_PRMSN_UPDATED)
+    if "안전사용서비스" in data_source and _DUR_UPDATED:
+        dates.add(_DUR_UPDATED)
+    if not dates and _PRMSN_UPDATED:
+        dates.add(_PRMSN_UPDATED)
+    suffix = f" (갱신일: {max(dates)})" if dates else ""
+    return f"데이터 출처: {data_source}{suffix}"
+
+
 def _assemble_answer(facts, summary, data_source, closing=None):
     """최종 답변 문자열을 Python에서 전부 완성한다. facts/summary를 따로 주고 메인 LLM에게
     조립을 맡기면, 라벨을 **굵게**로 바꾸거나 문단을 빠뜨리거나 근거에 없는 결론("운전은
@@ -925,7 +954,7 @@ def _assemble_answer(facts, summary, data_source, closing=None):
         parts += ["[정리]", f"{summary} {tail_text}".strip()]
     else:
         parts.append(tail_text)
-    parts += ["", f"데이터 출처: {data_source}"]
+    parts += ["", _data_source_line(data_source)]
     return "\n".join(parts)
 
 
@@ -1070,7 +1099,7 @@ def _no_evidence_result(item_name, closing=None):
         "resolved": True,
         "item_name": item_name,
         "relevant_paragraphs": [],
-        "answer": f"{text}\n\n데이터 출처: 의약품 제품허가정보 기준",
+        "answer": f"{text}\n\n{_data_source_line('의약품 제품허가정보 기준')}",
         "note": _ANSWER_NOTE,
     }
 
