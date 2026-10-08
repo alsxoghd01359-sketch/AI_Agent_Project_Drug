@@ -541,6 +541,32 @@ _INFO_SCOPE_KEYWORDS = {
 }
 
 
+def _msg_role(m):
+    return m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+
+
+def _msg_content(m):
+    content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+    return content or ""
+
+
+def _effective_question(messages, current_message):
+    """제품을 특정해달라는 되묻기("...말씀하시는 건가요?")에 사용자가 제품명만 답하면,
+    현재 메시지에는 원래 질문("성분이 뭐야" 등)의 의도가 전혀 남지 않는다. 직전
+    assistant 턴이 되묻기였으면 그 이전 사용자 질문을 이어받아 현재 메시지와 합쳐서
+    돌려준다. messages에는 이미 현재 사용자 메시지가 append된 상태로 들어오고, 그
+    앞에는 도구 호출 라운드(assistant tool_call -> tool 결과)가 끼어 있을 수 있어서
+    바로 앞이 아니라 역순으로 가장 가까운 user 메시지를 찾는다."""
+    if len(messages) >= 2 and _msg_role(messages[-2]) == "assistant" and "말씀하시는 건가요?" in _msg_content(messages[-2]):
+        for m in reversed(messages[:-2]):
+            if _msg_role(m) == "user":
+                prior_text = _msg_content(m)
+                if prior_text:
+                    return f"{prior_text} {current_message}"
+                break
+    return current_message
+
+
 def _info_scope(question):
     """질문이 성분·효능효과·용법용량 중 하나만 콕 집어 물었으면 그 범위만 보여주고,
     범위를 특정하지 않았거나("먹어도 되나요" 등 안전을 묻는 질문) 범위 키워드가 없으면
@@ -1227,6 +1253,11 @@ class Conversation:
         last_tool_name = None
         last_tool_result = None
 
+        # 되묻기에 제품명만 답한 경우, 원래 질문 의도를 이어받은 텍스트. 도구 인자의
+        # question을 채우거나 질문 의도를 키워드로 판단할 때는 이걸 쓰고, 감정·긴급
+        # 상황 감지처럼 "지금 이 문장 자체"가 중요한 곳에는 user_message를 그대로 쓴다.
+        question_context = _effective_question(self.messages, user_message)
+
         overdose_intent = any(k in user_message for k in _OVERDOSE_KEYWORDS)
         overdose_forced = False
 
@@ -1263,7 +1294,7 @@ class Conversation:
                     # 병용 확인은 제품이 2개 이상일 때만 의미가 있다. 1개뿐이면 질병·조건에 대한
                     # 질문이므로 생활질문 도구로 바꿔서 원래 질문 전체를 넘긴다.
                     fn_name = "ask_lifestyle_question"
-                    fn_args = {"product_name": fn_args["product_names"][0], "question": user_message}
+                    fn_args = {"product_name": fn_args["product_names"][0], "question": question_context}
                 if fn_name == "check_drug_interactions":
                     # 병용확인으로 넘어온 이름 중 음식·음료가 있으면 병용확인이 아니라 생활질문이다.
                     names = fn_args.get("product_names", [])
@@ -1272,30 +1303,30 @@ class Conversation:
                     if foods:
                         drugs = [n for n in names if n not in foods]
                         fn_name = "ask_lifestyle_question"
-                        fn_args = {"product_name": (drugs or names)[0], "question": user_message}
-                if fn_name == "ask_lifestyle_question" and _dur_type_for_question(user_message):
+                        fn_args = {"product_name": (drugs or names)[0], "question": question_context}
+                if fn_name == "ask_lifestyle_question" and _dur_type_for_question(question_context):
                     # 임부금기/서방정분할주의/첨가제주의 같은 DUR 유형 질문은 생활질문의 NB
                     # 원문 검색보다 DUR 항목으로 답하는 게 더 짧고 정확하다. "며칠"/"몇 알"처럼
                     # 기간·용량 질문과 겹치는 경우는 바로 아래에서 다시 생활질문으로 되돌아간다
                     # (그쪽이 NB·UD 원문에서 더 구체적인 답을 찾는다).
                     fn_name = "get_drug_info"
-                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
                 if fn_name == "get_drug_info" and (
-                    len(extract_conditions(user_message, CHAT_MODEL)) >= 2
-                    or _DURATION_OR_AMOUNT_RE.search(user_message)
+                    len(extract_conditions(question_context, CHAT_MODEL)) >= 2
+                    or _DURATION_OR_AMOUNT_RE.search(question_context)
                 ):
                     # 조건이 두 개 이상이면 DUR 전문 조회로는 조건별 근거를 보장할 수 없다.
                     # 생활질문 경로에서 조건마다 따로 검색한다.
                     fn_name = "ask_lifestyle_question"
-                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
-                if fn_name == "get_drug_info" and _age_group(user_message):
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
+                if fn_name == "get_drug_info" and _age_group(question_context):
                     # 나이 질문은 연령 DUR 항목 원문으로 답한다. 전체 조회 결과를 주면 원문에 없는 결론이 섞인다.
                     fn_name = "get_age_dur_info"
-                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
                 if fn_name == "get_drug_info":
                     # 질문 문맥에 따라 사용상주의사항 중 관련 문단과 DUR 유형을 고르려면 원래
                     # 질문이 필요하다. 모델이 실제로 넘긴 건 product_name뿐이라 직접 채운다.
-                    fn_args = {"product_name": fn_args["product_name"], "question": user_message}
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
                 fn = TOOL_DISPATCH.get(fn_name)
                 result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
                 if fn_name == "ask_lifestyle_question":
