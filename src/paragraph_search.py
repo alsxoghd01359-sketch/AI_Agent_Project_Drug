@@ -96,6 +96,22 @@ def _iter_articles(xml_str: str | None):
 def _chunk_labeled_paragraphs(xml_str: str | None) -> list[str]:
     chunks = []
     for title, paras in _iter_articles(xml_str):
+        # ":"로 끝나는 문단은 "다음 약들과 병용투여하지 않는다 :"처럼 바로 다음
+        # 문단이 그 목록이라는 뜻이다. 따로 쪼개면 지시문("~하지 않는다") 없이
+        # 목록만 남아 의미가 불완전해진다(실측: 용각산 "4. 상호작용" — "다른 진해,
+        # 거담제, 감기약, 항히스타민제, 진정제, 알코올 등"만 검색돼서 "하지 않는다"가
+        # 빠짐). 같은 article 안에서 ":"로 끝나는 문단은 다음 문단과 합친다.
+        merged = []
+        i = 0
+        while i < len(paras):
+            text = paras[i]
+            while text.rstrip().endswith((":", "：")) and i + 1 < len(paras):
+                i += 1
+                text = text.rstrip() + " " + paras[i]
+            merged.append(text)
+            i += 1
+        paras = merged
+
         current_heading = title or ""
         for text in paras:
             if _TOP_LEVEL_RE.match(text):
