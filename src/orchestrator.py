@@ -689,49 +689,35 @@ def _tool_search_by_symptom(symptom, current_medication_names=None):
     }
 
 
-_FOOD_EVIDENCE_PROMPT = """음식 또는 음료: "{term}"
+_FOOD_CROSS_PROMPT = """복용자 상황: "{condition}"
 
-아래 문단 중에 "{term}"을(를) 직접 다루는 내용이 있는지 판단하세요.
-같은 뜻으로 쓰인 말도 인정합니다. 예: 술은 알코올, 커피는 카페인 등.
-"알코올섭취"처럼 마시는 술에 대한 내용은 술(음료)에 대한 내용이므로 YES입니다.
-약의 성분, 부형제, 수유 중 이행 같은 내용은 음식 자체에 대한 내용이 아니므로 NO입니다.
-단어만 비슷하거나 다른 물질에 관한 내용이면 NO입니다. 음식 자체를 직접 다루면 YES, 아니면 NO만 답하세요.
+1) 이 상황이 음식이나 음료에 관한 것인지 판단하세요. 음식·음료가 아니면(예: 운전, 질환, 나이, 다른 약 등) "해당없음"이라고만 답하세요.
+2) 음식·음료에 관한 것이면, 아래 문단 중에 그 음식·음료를 직접 다루는 문단이 있는지 판단하세요.
+   같은 뜻으로 쓰인 말도 인정합니다. 예: 술은 알코올, 커피는 카페인 등. "알코올섭취"는 술(음료)에 대한 내용이므로 있는 것으로 봅니다.
+   약의 성분, 부형제, 수유 중 이행 같은 내용은 음식 자체에 대한 내용이 아닙니다.
+   직접 다루는 문단이 있으면 "YES", 없으면 "NO"만 답하세요.
+
+"해당없음", "YES", "NO" 중 하나만 답하세요.
 
 [문단]
 {paragraphs}
 """
 
-_FOOD_TARGET_PROMPT = """사용자 질문: "{question}"
 
-질문에 나온 음식이나 음료의 이름을 하나만 적으세요. 없으면 "없음"이라고만 적으세요.
-약 이름, 질환, 나이 등은 적지 마세요.
-"""
-
-
-def _food_term(question):
-    """질문에서 음식·음료 이름을 하나 뽑는다. 음식·음료가 아니면 None."""
+def _food_cross_check(condition, paragraphs):
+    """한 번의 호출로 "이 상황이 음식·음료에 관한 것인지"와 "문단이 그 음식을
+    다루는지"를 같이 판단한다. 따로 부르면(이전에는 "음식 이름 추출" + "성분/음식
+    분류" + "근거 확인" 최대 3번) 조건마다 호출이 늘어 느려진다."""
+    text = "\n".join(f"- {p}" for p in paragraphs) if paragraphs else "(문단 없음)"
     resp = _client.chat.completions.create(
         model=CHAT_MODEL,
         temperature=0,
-        messages=[{"role": "user", "content": _FOOD_TARGET_PROMPT.format(question=question)}],
+        messages=[{"role": "user", "content": _FOOD_CROSS_PROMPT.format(condition=condition, paragraphs=text)}],
     )
-    term = (resp.choices[0].message.content or "").strip().strip("\"'")
-    if not term or term == "없음":
-        return None
-    if classify_names([term], CHAT_MODEL).get(term) != "food":
-        return None
-    return term
-
-
-def _food_evidence_missing(term, paragraphs):
-    """근거 문단에 음식·음료 term을 직접 다루는 내용이 없으면 True."""
-    text = "\n".join(f"- {p['text']}" for p in paragraphs)
-    check = _client.chat.completions.create(
-        model=CHAT_MODEL,
-        temperature=0,
-        messages=[{"role": "user", "content": _FOOD_EVIDENCE_PROMPT.format(term=term, paragraphs=text)}],
-    )
-    return not (check.choices[0].message.content or "").strip().upper().startswith("YES")
+    answer = (resp.choices[0].message.content or "").strip()
+    if "해당없음" in answer:
+        return "not_food"
+    return "yes" if answer.upper().startswith("Y") else "no"
 
 
 
@@ -772,14 +758,15 @@ def _pick_with_food_check(condition, raw):
     판정을 통과하지 못하면 걸러낼 길이 없었다(이전에는 마지막 LLM 응답 단계에서
     가끔 걸러졌지만, 그 단계를 없앤 뒤로는 그대로 새어 나갔다)."""
     picked = _pick_for_condition(condition, raw)
-    term = _food_term(condition)
-    if term:
-        if picked:
-            if _food_evidence_missing(term, picked[:3]):
-                picked = []
-        elif raw and not _food_evidence_missing(term, raw[:3]):
-            picked = raw[:2]
-    return picked
+    check_source = picked or raw
+    if not check_source:
+        return picked
+    result = _food_cross_check(condition, [p["text"] for p in check_source[:3]])
+    if result == "not_food":
+        return picked
+    if picked:
+        return [] if result == "no" else picked
+    return raw[:2] if result == "yes" else []
 
 
 def _attach_body(picked, all_paragraphs):
