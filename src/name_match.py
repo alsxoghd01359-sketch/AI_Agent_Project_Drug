@@ -64,13 +64,22 @@ def find_candidates(query: str, top_k: int = 5, min_score: float = 60.0):
     )
 
     # 줄임말 입력("쏘메토" -> "쏘메토320밀리그램연질캡슐")은 긴 정식 이름과 문자열 유사도가
-    # 낮아서 무관한 짧은 이름들에 밀린다. 입력으로 시작하는 정식 이름은 최소 85점으로 올린다.
+    # 낮아서 무관한 짧은 이름들에 밀린다. 입력으로 시작하는 정식 이름은 최소 점수를 올린다.
+    #
+    # 치명적 버그(실측): "초당아스피린장용정100mg"으로 검색하면, 실제로 존재하는 정확한
+    # 제품 "초당아스피린장용정100mg(아스피린)"의 WRatio 점수가 84.2에 그치는데, 전혀 다른
+    # 제조사의 "한미아스피린장용정100밀리그램" 등은 글자 수가 같다는 이유만으로 87.5를
+    # 받아서 더 높았다. 이 보정값이 85.0이라 여전히 87.5보다 낮아서, 정답 제품이 top_k=5
+    # 안에 못 들고(11위) 완전히 무관한 다른 제조사 제품 5개만 후보로 나왔다. 입력이 정식
+    # 이름의 접두사/부분문자열로 그대로 들어있는 경우는 "우연히 비슷한 다른 이름"보다
+    # 항상 우선해야 하므로, 어떤 우연의 일치보다도 높도록 99.0으로 올린다(완전 일치는
+    # WRatio 자체가 이미 100에 가까우므로 100은 그 몫으로 남겨둔다).
     clean_query = _clean_for_contains(raw_query)
     if len(clean_query) >= 2:
         best = {idx: score for _n, score, idx in results}
         for idx, clean_name in enumerate(_CLEAN_NAMES):
             if clean_name.startswith(clean_query) or clean_query in clean_name:
-                best[idx] = max(best.get(idx, 0.0), 85.0)
+                best[idx] = max(best.get(idx, 0.0), 99.0)
         results = sorted(((n, s, i) for i, s in best.items() for n in [_NORMALIZED_NAMES[i]]),
                          key=lambda r: -r[1])
 
