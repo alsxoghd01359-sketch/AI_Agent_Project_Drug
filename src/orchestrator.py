@@ -447,11 +447,23 @@ _SYMPTOM_SAFETY_BULLET = (
 def _interaction_facts(result):
     """병용금기·성분 중복·효능군 중복을 bullet로 나열한다. 어떤 종류인지 라벨을 붙여서
     한 줄로 뭉쳐 보여주던 것보다 어떤 조합이 왜 문제인지 구분해서 볼 수 있게 한다."""
+def _name_with_ingredient(drug_name, ingredient):
+    # 제품명에 이미 성분이 들어있는 경우(예: "코니트라캡슐(이트라코나졸)(수출용)")
+    # "(이트라코나졸)"을 또 붙이면 "...(이트라코나졸)(수출용)(이트라코나졸)"처럼
+    # 중복 표기된다(실측). 이미 포함돼 있으면 괄호를 또 붙이지 않는다.
+    if ingredient and ingredient in drug_name:
+        return drug_name
+    return f"{drug_name}({ingredient})" if ingredient else drug_name
+
+
+def _interaction_facts(result):
+    """병용금기·성분 중복·효능군 중복을 bullet로 나열한다. 어떤 종류인지 라벨을 붙여서
+    한 줄로 뭉쳐 보여주던 것보다 어떤 조합이 왜 문제인지 구분해서 볼 수 있게 한다."""
     bullets = []
     for h in result.get("dur_taboo_matches", []):
-        bullets.append(
-            f"- (병용금기) {h['drug_a']}({h['ingredient_a']})과 {h['drug_b']}({h['ingredient_b']}): {h['reason']}"
-        )
+        a = _name_with_ingredient(h['drug_a'], h['ingredient_a'])
+        b = _name_with_ingredient(h['drug_b'], h['ingredient_b'])
+        bullets.append(f"- (병용금기) {a}과 {b}: {h['reason']}")
     for d in result.get("duplicate_ingredients", []):
         bullets.append(
             f"- (성분 중복) {d['ingredient']} 성분이 {', '.join(d['drugs'])}에 공통으로 들어 있어 과다복용 위험이 있습니다."
@@ -469,12 +481,30 @@ def _interaction_facts(result):
 def _interaction_summary(result):
     # 병용금기·성분 중복·효능군 중복은 서로 다른 성격의 위험이라, 가장 심각한 것부터
     # 하나만 골라 한 줄로 말한다(LLM에 맡기지 않고 Python이 정한다 — 이미 구조화된
-    # 결과라 요약을 다시 판단할 필요가 없고, 매번 같은 결론이 나와야 한다).
-    if result.get("dur_taboo_matches"):
-        return "등록된 병용금기가 있으므로 함께 복용해서는 안 됩니다."
-    if result.get("duplicate_ingredients"):
+    # 결과라 요약을 다시 판단할 필요가 없고, 매번 같은 결론이 나와야 한다). 다만
+    # "등록된 병용금기가 있으므로 함께 복용해서는 안 됩니다"처럼 약 이름도 이유도 없는
+    # 문장은 너무 짧아서 의도한 정리문처럼 안 느껴진다(실측 피드백) — 구조화된 결과에
+    # 이미 약 이름과 이유가 있으므로 그대로 문장에 넣는다. 조합이 여러 개면(어느 걸
+    # 대표로 보여줄지 애매하므로) 기존처럼 일반적인 문장으로 되돌아간다.
+    taboo = result.get("dur_taboo_matches") or []
+    if len(taboo) == 1:
+        h = taboo[0]
+        a = _name_with_ingredient(h['drug_a'], h['ingredient_a'])
+        b = _name_with_ingredient(h['drug_b'], h['ingredient_b'])
+        return f"{a}과 {b}는 함께 복용하면 {h['reason']} 위험이 있는 병용금기 조합으로 등록되어 있어, 함께 복용해서는 안 됩니다."
+    if taboo:
+        return "등록된 병용금기 조합이 여러 건 있으므로 함께 복용해서는 안 됩니다."
+    dup = result.get("duplicate_ingredients") or []
+    if len(dup) == 1:
+        d = dup[0]
+        return f"{', '.join(d['drugs'])}에 공통으로 {d['ingredient']} 성분이 들어 있어, 함께 복용하면 과다복용 위험이 있습니다."
+    if dup:
         return "같은 성분이 중복되어 과다복용 위험이 있습니다."
-    if result.get("effect_group_duplicates"):
+    eff = result.get("effect_group_duplicates") or []
+    if len(eff) == 1:
+        e = eff[0]
+        return f"{e['drug_a']}과 {e['drug_b']}는 성분은 다르지만 둘 다 {e['effect_group']}에 속해 효과가 중복될 수 있습니다."
+    if eff:
         return "효능이 겹치는 성분이 있어 과다복용과 비슷한 위험이 있습니다."
     return "등록된 병용금기가 없습니다."
 
@@ -502,7 +532,7 @@ def _tool_check_drug_interactions(product_names):
         detail = get_product_detail(seq)
         # 과량 문구는 e약은요 요약이 아니라 원본 NB 문서에만 있으므로 원본을 본다.
         raw_caution = doc_xml_to_text(_get_detail(seq).get("NB_DOC_DATA"))
-        overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+        overdose_sentences = _extract_overdose_blocks(raw_caution)
         facts = "\n".join(
             _split_field("용법용량", detail.get("용법용량") or "")
             + ([_plain_bullets(overdose_sentences, "과량투여")] if overdose_sentences else [])
@@ -541,7 +571,11 @@ def _tool_check_drug_interactions(product_names):
 
 _DUR_TYPE_KEYWORDS = {
     "임부금기": ("임신", "임산부", "임부", "수유"),
-    "투여기간주의": ("며칠", "몇일", "얼마나 오래", "오래", "기간"),
+    # "오랫동안"은 "오래"와 둘째 글자가 다르다(오+래 "동안"이 사이시옷으로 "오랫동안"이
+    # 되면서 "래"가 "랫"으로 바뀜) — 그래서 "오래"만 있으면 "오랫동안 먹어도 되나요?"가
+    # 매칭 안 됐다(실측: 맥페란정, 전체 덤프로 샘). "장기"도 원문 데이터 표현("장기
+    # 복용", "장기간 복용")과 맞춰 추가한다.
+    "투여기간주의": ("며칠", "몇일", "얼마나 오래", "오래", "오랫동안", "장기", "기간"),
     "서방정분할주의": ("쪼개", "나눠", "분할", "갈아"),
     "용량주의": ("하루 몇", "몇 알", "몇 정", "최대 용량", "용량"),
     "첨가제주의": ("첨가제", "부형제"),
@@ -569,7 +603,10 @@ def _dur_type_for_question(question):
 
 _INFO_SCOPE_KEYWORDS = {
     "ingredients": ("성분", "주성분", "원료"),
-    "efficacy": ("효능", "효과"),
+    # "증상"을 추가한다 — "어떤 증상에 먹는 약이야?"처럼 "효능"/"효과"라는 단어 없이
+    # 증상을 묻는 질문도 결국 효능효과 하나만 궁금한 것인데, 이 키워드가 없으면
+    # scope가 None이 되어 성분·용법용량·DUR까지 전부 나온다(실측).
+    "efficacy": ("효능", "효과", "증상에 먹는", "증상에 쓰", "무슨 병", "어디에 쓰"),
     "usage": ("용법", "용량", "복용법", "몇 알", "몇 정", "어떻게 먹", "먹는 법"),
     # "중지"는 빼둔다 — "복용 중지해야 하나요?"처럼 약을 그만 먹는다는 뜻으로도 많이
     # 쓰여서, "판매 중지" 의도가 아닌데도 이 범위로 잘못 좁혀질 위험이 있다. "판매"
@@ -1470,6 +1507,34 @@ def _no_evidence_result(item_name, closing=None, topic="질문하신 내용", da
     }
 
 
+_OVERDOSE_BOUNDARY_RE = re.compile(r"^\d+[.)]")
+
+
+def _extract_overdose_blocks(raw_caution):
+    """원문에서 "과량"/"과다"가 들어간 줄만 뽑으면 "13) 이 약의 과량 복용 시 다음과
+    같은 이상반응이 나타날 수 있다." 같은 제목 줄만 남고, 그 아래 번호로 나열된 실제
+    증상·처치 내용(실측: "(1) 귀와 미로 이상: 어지러움" 등 8개 줄, "과량"이라는 글자가
+    안 들어간 문구 하나하나)은 전부 걸러져 사라진다(실측: 부루펜정200밀리그램).
+    그래서 "과량"/"과다"가 들어간 줄을 찾으면 그 줄부터, 다음 번호 항목("6.", "7)" 등
+    줄머리의 숫자+점/괄호)이 나오기 전까지를 통째로 한 블록으로 가져온다."""
+    lines = raw_caution.split("\n")
+    blocks = []
+    i, n = 0, len(lines)
+    while i < n:
+        if any(k in lines[i] for k in ("과량", "과다")):
+            block = [lines[i].strip()]
+            j = i + 1
+            while j < n and not _OVERDOSE_BOUNDARY_RE.match(lines[j].strip()):
+                if lines[j].strip():
+                    block.append(lines[j].strip())
+                j += 1
+            blocks.append(" ".join(block))
+            i = j
+        else:
+            i += 1
+    return blocks
+
+
 def _tool_get_overdose_info(product_name):
     result = search_product_with_confidence(product_name)
     if not result["confident"]:
@@ -1483,7 +1548,7 @@ def _tool_get_overdose_info(product_name):
     item_name = result["candidates"][0]["item_name"]
     rx_closing = _prescription_closing(item_seq)
     raw_caution = doc_xml_to_text(_get_detail(item_seq).get("NB_DOC_DATA"))
-    overdose_sentences = [s.strip() for s in re.split(r"\n|(?<=[.])\s+", raw_caution) if "과량" in s]
+    overdose_sentences = _extract_overdose_blocks(raw_caution)
     if not overdose_sentences:
         return _no_evidence_result(item_name, closing=rx_closing)
     facts = _plain_bullets(overdose_sentences, "과량투여")
