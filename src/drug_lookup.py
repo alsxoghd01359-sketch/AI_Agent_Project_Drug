@@ -409,15 +409,20 @@ def search_product_with_confidence(query: str, top_k: int = 5, overlap_threshold
         # 제품명 뒤에 붙은 "(주성분)" 표기는 식약처 원본 데이터 그대로지만, 되묻는
         # 목록에서는 사용자가 실제로 아는 제품명만 보이는 게 알아보기 쉽다. 또한 제품이
         # 여럿이면 한 줄에 쉼표로 늘어놓지 않고 한 줄씩 나열해서 읽기 쉽게 한다.
+        # "아세트아미노펜 계열"만 말하면 사용자가 입력한 브랜드명과 동떨어져 보인다.
+        # 사용자가 "게보린"을 검색했으면 "게보린(아세트아미노펜) 계열"처럼 검색어를
+        # 같이 보여줘야 자기가 물어본 제품군이라는 게 바로 연결된다.
+        query_label = _strip_brackets(normalize_units(query)).strip()
         questions = []
         for g in candidate_groups:
             display_products = [_strip_brackets(n) for n in g["products"]]
+            group_label = f"{query_label}({g['ingredients'][0]})" if query_label else g["ingredients"][0]
             if len(display_products) == 1:
-                questions.append(f"{g['ingredients'][0]} 계열의 {display_products[0]}을 말씀하시는 건가요?")
+                questions.append(f"{group_label} 계열의 {display_products[0]}을 말씀하시는 건가요?")
             else:
                 product_lines = "\n".join(f"- {n}" for n in display_products)
                 questions.append(
-                    f"{g['ingredients'][0]} 계열에는 다음 제품들이 있습니다. 그중 어떤 제품을 말씀하시는 건가요?\n{product_lines}"
+                    f"{group_label} 계열에는 다음 제품들이 있습니다. 그중 어떤 제품을 말씀하시는 건가요?\n{product_lines}"
                 )
         result["clarification_question"] = "\n\n".join(questions)
 

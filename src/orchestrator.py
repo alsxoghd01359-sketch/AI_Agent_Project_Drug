@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from emergency_detect import detect_emergency
-from drug_lookup import check_multiple_drugs, search_product_with_confidence, get_product_detail, _get_detail
+from drug_lookup import check_multiple_drugs, search_product_with_confidence, get_product_detail, _get_detail, _strip_brackets
 from text_extract import doc_xml_to_text
 from symptom_search import search_by_symptom
 from paragraph_search import search_paragraphs, _get_paragraphs
@@ -294,8 +294,8 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
    안에 이미 넣어 두었습니다. 10번 규칙대로 answer를 그대로 출력하면 됩니다.
 10. get_drug_info, ask_lifestyle_question, get_overdose_info, check_drug_interactions
     (제품이 모두 특정된 경우) 결과에 answer 필드가 있으면, 그 문자열을 글자 하나,
-    줄바꿈이나 라벨 하나도 바꾸지 말고 통째로 그대로 출력하세요 — [조회된 사실]/
-    [정리]/약사 상담/데이터 출처까지 이미 다 조립되어 있습니다. 요약하거나, 라벨을
+    줄바꿈이나 라벨 하나도 바꾸지 말고 통째로 그대로 출력하세요 — 정리(요약)/
+    [조회된 사실]/약사 상담/데이터 출처까지 이미 다 조립되어 있습니다. 요약하거나, 라벨을
     **굵게**나 다른 말로 바꾸거나, 문장을 합치거나 순서를 바꾸거나, 근거에 없는
     말을 덧붙이지 마세요.
 11. 사용자가 과다복용·과량 복용 결과를 물으면(예: "타이레놀 과다복용하면 어떻게 돼?"),
@@ -490,7 +490,7 @@ def _tool_check_drug_interactions(product_names):
         )
         summary = "같은 제품을 중복해서 드시는 것이므로, 병용이 아니라 과다복용에 주의해야 합니다."
         rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
-        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
+        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing, item_name=detail.get("item_name"))
         return {
             "same_product_repeated": True,
             "item_name": detail.get("item_name"),
@@ -512,7 +512,10 @@ def _tool_check_drug_interactions(product_names):
         r.pop("dur_cautions", None)
     facts = _interaction_facts(result)
     summary = _interaction_summary(result)
-    result["answer"], result["footer"] = _assemble_answer(facts, summary, "의약품안전사용서비스 기준", closing=rx_closing)
+    interaction_item_names = [r["item_name"] for r in result.get("resolved_drugs", []) if r.get("item_name")]
+    result["answer"], result["footer"] = _assemble_answer(
+        facts, summary, "의약품안전사용서비스 기준", closing=rx_closing, item_name=interaction_item_names
+    )
     result["note"] = _ANSWER_NOTE
     return result
 
@@ -523,6 +526,17 @@ _DUR_TYPE_KEYWORDS = {
     "서방정분할주의": ("쪼개", "나눠", "분할", "갈아"),
     "용량주의": ("하루 몇", "몇 알", "몇 정", "최대 용량", "용량"),
     "첨가제주의": ("첨가제", "부형제"),
+}
+
+# DUR 유형을 콕 집은 질문인데 구조화 DUR도, NB 원문도 아무것도 못 찾았을 때, "근거
+# 없음" 안내에 어떤 주제를 못 찾았는지 자연어로 넣는다. "질문하신 내용"으로 뭉뚱그리지
+# 않고 "임부·수유부 관련 주의사항이 없습니다"처럼 구체적으로 말하는 쪽이 더 친절하다.
+_DUR_TYPE_TOPIC = {
+    "임부금기": "임부·수유부",
+    "투여기간주의": "복용 기간",
+    "서방정분할주의": "분할 복용",
+    "용량주의": "용량",
+    "첨가제주의": "첨가제",
 }
 
 
@@ -550,6 +564,17 @@ def _msg_content(m):
     return content or ""
 
 
+def _is_clarification_reply(messages):
+    """messages의 마지막이 사용자 메시지이고, 그 직전 assistant 턴이 제품을
+    특정해달라는 되묻기("...말씀하시는 건가요?")였으면 True. _effective_question과
+    Conversation.send()의 브랜드명 고정(핀) 로직이 같은 기준을 쓴다."""
+    return (
+        len(messages) >= 2
+        and _msg_role(messages[-2]) == "assistant"
+        and "말씀하시는 건가요?" in _msg_content(messages[-2])
+    )
+
+
 def _effective_question(messages, current_message):
     """제품을 특정해달라는 되묻기("...말씀하시는 건가요?")에 사용자가 제품명만 답하면,
     현재 메시지에는 원래 질문("성분이 뭐야" 등)의 의도가 전혀 남지 않는다. 직전
@@ -557,7 +582,7 @@ def _effective_question(messages, current_message):
     돌려준다. messages에는 이미 현재 사용자 메시지가 append된 상태로 들어오고, 그
     앞에는 도구 호출 라운드(assistant tool_call -> tool 결과)가 끼어 있을 수 있어서
     바로 앞이 아니라 역순으로 가장 가까운 user 메시지를 찾는다."""
-    if len(messages) >= 2 and _msg_role(messages[-2]) == "assistant" and "말씀하시는 건가요?" in _msg_content(messages[-2]):
+    if _is_clarification_reply(messages):
         for m in reversed(messages[:-2]):
             if _msg_role(m) == "user":
                 prior_text = _msg_content(m)
@@ -584,6 +609,12 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
     붙인다. dur_cautions는 질문이 특정 유형을 물었으면 그 유형만, 아니면 전체를 보여준다
     (어떤 유형을 보여줄지 LLM이 매번 다시 판단하게 하면 흔들린다)."""
     scope = _info_scope(question)
+    # DUR 유형(임부금기/노인주의/용량주의 등)을 콕 집어 물은 질문도 "성분이 뭐야"처럼
+    # 범위를 좁혀 물은 것과 같다. dtype이 있으면 scope가 None이어도(= "성분"/"효능"/
+    # "용법" 키워드가 없어도) 성분·효능효과·용법용량이나 사용상주의사항 전문 검색까지
+    # 같이 보여주면 묻지 않은 걸 끼워 넣는 셈이다(실측: "임산부인데 먹어도 되나요?"에
+    # 성분·효능효과·용법용량·전체 경고까지 다 나와서 "임부금기" 외의 내용이 끼어들었다).
+    dtype = _dur_type_for_question(question)
     basic = []
     if detail.get("cancel_name") and detail["cancel_name"] != "정상":
         # 판매 중지 여부는 뭘 물었든 항상 먼저 알린다(안전과 직결).
@@ -591,23 +622,32 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
             f"- (판매 상태) 이 제품은 {detail.get('cancel_date')}자로 {detail['cancel_name']} 처리되어 "
             "더 이상 정상적으로 판매되지 않습니다. 복용 중이라면 약사나 의사와 상담하세요."
         )
-    if scope in (None, "ingredients") and detail.get("ingredients"):
+    if scope in (None, "ingredients") and not dtype and detail.get("ingredients"):
         basic.append(f"- (성분) {', '.join(detail['ingredients'])}")
-    if scope in (None, "ingredients", "efficacy"):
+    if scope in (None, "ingredients", "efficacy") and not dtype:
         basic += _split_field("효능효과", detail.get("효능효과") or "")
-    if scope in (None, "usage"):
+    if scope in (None, "usage") and not dtype:
         basic += _split_field("용법용량", detail.get("용법용량") or "")
 
     # 사용상주의사항 원문 검색과 DUR 전체 목록은 "먹어도 되나요"처럼 범위를 특정하지
     # 않은 안전 질문에만 보여준다. "성분이 뭐야"처럼 단순 정보 질문에 경고·DUR까지
     # 끼워 넣으면 묻지 않은 걸 같이 알려주는 셈이라 불필요하게 느껴진다. 다만 질문이
     # 특정 DUR 유형(예: 용량주의)을 콕 집었으면 범위를 좁혀 물은 것과 같으니 보여준다.
-    dtype = _dur_type_for_question(question)
     caution_md = ""
     dur_lines = []
     if scope is None or dtype:
         if scope is None:
             paragraphs = search_paragraphs(item_seq, "NB", question or detail.get("item_name") or "", top_k=5)
+            if dtype:
+                # DUR 유형을 콕 집은 질문이면 top-5 중 그 유형과 무관한 다른 경고까지
+                # 전부 보여주면 묻지 않은 걸 끼워 넣는 셈이다(실측: "임산부인데
+                # 먹어도 되나요?"에 간장애·글루타치온·최대용량 경고까지 다 나왔다).
+                # 하지만 아예 다 빼버리면 구조화 DUR 데이터에 없는 임신 관련 문구가
+                # NB 원문에만 있는 경우(실측: 타이레놀 임부금기 DUR은 미등록이지만
+                # NB에는 "임부 또는 수유부는... 상의할 것"이 있음) 그 유일한 근거까지
+                # 사라진다. ask_lifestyle_question과 같은 방식으로 실제 관련 있는
+                # 문단만 추려서 보여준다.
+                paragraphs = _pick_with_relevance_check(question, paragraphs)
             caution_md = _bullets_to_md(_render_bullets([p["text"] for p in paragraphs])) if paragraphs else ""
         dur_cautions = detail.get("dur_cautions", [])
         relevant = [d for d in dur_cautions if d.get("type") == dtype] if dtype else dur_cautions
@@ -617,20 +657,32 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
             )
             for d in relevant
         ]
-        if dtype and not relevant:
-            dur_lines.append(f"- (DUR: {dtype}) 등록된 정보가 없습니다.")
+        if dtype and not relevant and not caution_md:
+            # 구조화된 DUR 데이터도 없고 NB 원문 검색(caution_md)도 못 찾았으면, 그
+            # "(DUR: 유형) 등록된 정보가 없습니다." 한 줄짜리 facts를 그대로
+            # _make_summary에 넘기면 "~에 따라, 등록된 정보가 없습니다" 같은 어색한
+            # 문장이 나온다. 병용금기 없음/노인·소아 근거 없음과 똑같이, 이 경우도
+            # Python이 고정 문장으로 바로 답한다 — 주제를 구체적으로 밝혀서
+            # "질문하신 내용"으로 뭉뚱그리지 않는다.
+            no_evidence = _no_evidence_result(
+                detail.get("item_name"),
+                closing=_PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None,
+                topic=_DUR_TYPE_TOPIC.get(dtype, dtype),
+                data_source=data_source,
+            )
+            return no_evidence["answer"], no_evidence["footer"]
 
     facts = "\n".join(filter(None, ["\n".join(basic), caution_md, "\n".join(dur_lines)])) or "등록된 정보가 없습니다."
-    summary = _make_summary(facts)
+    summary = _make_summary(facts, item_name=detail.get("item_name"), data_source=data_source)
     closings = []
-    if scope is None and detail.get("has_interaction_data"):
+    if scope is None and not dtype and detail.get("has_interaction_data"):
         closings.append(
             "이 약은 특정 약과 함께 복용 시 주의가 필요한 조합이 등록되어 있습니다. "
             "현재 복용 중인 다른 약이 있으면 알려주시면 추가로 확인해드리겠습니다."
         )
     if detail.get("spclty_pblc") == "전문의약품":
         closings.append(_PRESCRIPTION_NOTE)
-    return _assemble_answer(facts, summary, data_source, closing=closings)
+    return _assemble_answer(facts, summary, data_source, closing=closings, item_name=detail.get("item_name"))
 
 
 def _tool_get_drug_info(product_name, question="", build_answer=True):
@@ -684,7 +736,7 @@ def _tool_get_age_dur_info(product_name, question):
         for d in entries
     )
     rx_closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
-    answer, footer = _assemble_answer(facts, None, detail["data_source"], closing=rx_closing)
+    answer, footer = _assemble_answer(facts, None, detail["data_source"], closing=rx_closing, item_name=detail.get("item_name"))
     return {
         "resolved": True,
         "item_name": detail["item_name"],
@@ -806,7 +858,13 @@ _CONDITION_PICK_PROMPT = """복용자 상황: "{condition}"
 
 
 def _pick_for_condition(condition, paragraphs):
-    """조건에 직접 해당하는 문단만 고른다. 고른 문단은 원문 그대로 쓴다."""
+    """조건에 직접 해당하는 문단만 고른다. 고른 문단은 원문 그대로 쓴다.
+    순서는 임베딩 검색 점수(raw 순서)가 아니라, 프롬프트가 요청한 "조건 없이 그대로
+    맞아떨어지는 문단 먼저" 순서를 따른다 — 임베딩 유사도는 문장이 길고 키워드가
+    많이 겹치면 점수가 높아지는 경향이 있어서, "매일 세 잔 이상 마시는 사람" 같은
+    좁은 조건문이 "알코올을 복용한 사람" 같은 더 직접적인 문구보다 먼저 나오는
+    경우가 있었다. 사용자가 실제로 물은 대상에 조건 없이 바로 해당하는 근거를
+    먼저 보여줘야 자연스럽다."""
     if not paragraphs:
         return []
     text = "\n".join(f"{i + 1}. {p['text']}" for i, p in enumerate(paragraphs))
@@ -815,8 +873,14 @@ def _pick_for_condition(condition, paragraphs):
         temperature=0,
         messages=[{"role": "user", "content": _CONDITION_PICK_PROMPT.format(condition=condition, paragraphs=text)}],
     )
-    numbers = {int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")}
-    return [p for i, p in enumerate(paragraphs, 1) if i in numbers]
+    order = [int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")]
+    seen = set()
+    picked = []
+    for n in order:
+        if n not in seen and 1 <= n <= len(paragraphs):
+            seen.add(n)
+            picked.append(paragraphs[n - 1])
+    return picked
 
 
 def _pick_with_relevance_check(condition, raw):
@@ -832,22 +896,73 @@ def _pick_with_relevance_check(condition, raw):
         # 이미 고른 문단 전체를 다시 확인한다(일부만 보면 뒤쪽에 있는 정상적인
         # 문단을 잘라낼 수 있다).
         keep = _relevance_filter(condition, [p["text"] for p in picked])
-        return [picked[i] for i in keep]
+        return _order_by_directness(condition, [picked[i] for i in keep])
     if not raw:
         return []
     # 고른 게 없으면 상위 몇 개만 느슨하게 다시 본다(_pick_for_condition이
     # 너무 엄격했던 경우를 보완하는 마지막 fallback이라 비용을 제한한다).
     check_source = raw[:3]
     keep = _relevance_filter(condition, [p["text"] for p in check_source])
-    return [check_source[i] for i in keep][:2]
+    return _order_by_directness(condition, [check_source[i] for i in keep][:2])
 
 
-def _attach_body(picked, all_paragraphs):
+_DIRECTNESS_ORDER_PROMPT = """아래 문단들은 모두 사용자의 상황 "{condition}"에 해당한다고 이미
+확인됐습니다. 문단마다 이 상황에 조건 없이 그대로 직접 해당하는지, 아니면 양·빈도·정도 같은
+특정 조건이 붙어야 해당하는 더 좁은 경우인지 판단하세요.
+
+{paragraphs}
+
+조건 없이 직접 해당하는 문단 번호부터, 조건이 붙은 문단 번호를 그 다음에 쉼표로, 전부
+빠짐없이 답하세요(예: "2, 1").
+"""
+
+
+def _order_by_directness(condition, paragraphs):
+    """조건에 맞는다고 이미 고른 문단들을 "조건 없이 그대로 해당" -> "조건부로만 해당"
+    순서로 재배열한다. _pick_for_condition에 선별과 순서 지정을 한꺼번에 시키면(같은
+    프롬프트에 순서 기준을 추가해도) 결국 입력 순서를 그대로 베끼는 경우가 실측으로
+    반복됐다(예: 타이레놀 "술" 조건에서 "매일 세 잔 이상 마시는 사람"(조건부)이 "알코올을
+    복용한 사람"(조건 없음)보다 임베딩 점수가 낮아 먼저 입력됐는데, 선별+순서를 같이
+    시키면 늘 입력 순서 그대로 나왔다). 순서 재배열만 따로 물어도, "조건 없는 문단을
+    먼저 써라"는 규칙만 추상적으로 주면(8/8 실패) 여전히 입력 순서를 베꼈다. 문단마다
+    "조건 없이 직접 해당하는가, 조건이 붙는가"를 먼저 판단하게 시키니(비교·판단을
+    명시적으로 요구) 안정적으로 맞혔다(조건 문구가 짧은 명사("술")든 긴 질문문
+    ("술을 마셔도 되나요?")이든 8/8). 문단이 1개 이하면 재배열할 필요가 없다."""
+    if len(paragraphs) < 2:
+        return paragraphs
+    text = "\n".join(f"문단{i + 1}: {p['text']}" for i, p in enumerate(paragraphs))
+    resp = _client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        messages=[{"role": "user", "content": _DIRECTNESS_ORDER_PROMPT.format(condition=condition, paragraphs=text)}],
+    )
+    order = [int(n) for n in re.findall(r"\d+", resp.choices[0].message.content or "")]
+    seen = set()
+    result = []
+    for n in order:
+        if n not in seen and 1 <= n <= len(paragraphs):
+            seen.add(n)
+            result.append(paragraphs[n - 1])
+    result += [p for i, p in enumerate(paragraphs, 1) if i not in seen]
+    return result
+
+
+def _attach_body(picked, all_paragraphs, condition=None):
     """짧은 제목 문단(예: "[11. 기타] ② 신기능 부전증")이 골라지면, 바로 뒤의 본문 문단을 함께 붙인다.
-    본문은 같은 장 표시를 가지고 있고, 다음 소제목(짧은 문단)을 만나면 멈춘다."""
+    본문은 같은 장 표시를 가지고 있고, 다음 소제목(짧은 문단)을 만나면 멈춘다.
+
+    다만 짧은 문단이 "제목+본문이 분리된 경우"만 있는 게 아니라, "9) 고령자(노인)",
+    "10) 임부 또는 수유부", "11) 와파린... 복용 환자"처럼 같은 조항 번호 목록 안에서
+    서로 다른 대상을 나열한 항목인 경우도 있다(실측: "80세 노인인데 먹어도 되나요?"에
+    바로 뒤에 붙은 "임부 또는 수유부", "와파린 복용 환자" 항목까지 같이 끼어들어서
+    묻지도 않은 내용이 나왔다). 이런 항목은 길이·같은 라벨이라는 조건만으로는 진짜
+    본문 이어붙이기와 구분이 안 되므로, condition을 주면 새로 붙이려는 문단이 실제로
+    그 조건과 관련 있는지 다시 확인하고 관련 없으면 붙이지 않는다. 원래 picked에
+    있던 문단은(이미 한 번 관련성 확인을 거쳤으므로) 다시 거르지 않는다."""
     texts = list(all_paragraphs)
     result = []
     seen = set()
+    extra = []
     for p in picked:
         if p["text"] not in seen:
             seen.add(p["text"])
@@ -864,7 +979,14 @@ def _attach_body(picked, all_paragraphs):
                 break
             if nxt not in seen:
                 seen.add(nxt)
-                result.append({"text": nxt, "score": p["score"], "condition": p.get("condition")})
+                entry = {"text": nxt, "score": p["score"], "condition": p.get("condition")}
+                result.append(entry)
+                extra.append(entry)
+    if condition and extra:
+        keep_idx = _relevance_filter(condition, [e["text"] for e in extra])
+        keep_texts = {extra[i]["text"] for i in keep_idx}
+        extra_texts = {e["text"] for e in extra}
+        result = [r for r in result if r["text"] not in extra_texts or r["text"] in keep_texts]
     return result
 
 
@@ -885,6 +1007,11 @@ def _age_group(question):
 
 _BULLET_PROMPT = """아래 문단을 번호 순서대로, 번호마다 한 문장씩 이해하기 쉬운 말로 바꾸세요.
 문단에 없는 내용은 쓰지 마세요. 결론이나 주의를 말하는 표현(예: 무시해도 좋을 것으로 예상된다, 신중히 투여, 투여하지 말 것, 증강시킬 수 있다)은 원문 표현을 한 글자도 바꾸지 말고 그대로 옮기세요. 그 밖의 설명만 쉬운 말로 바꿀 수 있습니다.
+문단이 "제목: 9) 대상"처럼 제목과 원문 목록 번호가 섞인 형태면, "9)" 같은 목록 번호는
+지우고 제목과 대상을 자연스러운 한 문장으로 합치세요(예: "다음과 같은 사람은 이 약을 복용하지
+말 것: 9) 알코올을 복용한 사람" -> "알코올을 복용한 사람은 이 약을 복용하지 말 것"). 목록
+번호를 지우는 것과 결론 표현의 글자를 바꾸는 것은 다릅니다 — 번호만 지우고 결론 표현("복용하지
+말 것" 등)은 그대로 쓰세요.
 번호와 줄 개수를 입력과 똑같이 유지하고 "1. 문장" 형식으로만 쓰세요. 다른 말은 덧붙이지 마세요.
 
 {blocks}
@@ -909,7 +1036,30 @@ def _render_bullets(evidence_texts):
     if not evidence_texts:
         return []
     labels = [_section_label(t) for t in evidence_texts]
-    bodies = [re.sub(r"^\[[^\]]*\]\s*", "", t) for t in evidence_texts]
+
+    def _body_for_rewrite(text, label):
+        # 헤딩이 짧으면(라벨로 따로 보여줄 수 있으면) 본문에서는 그냥 뗀다 — 헤딩은
+        # "(출처: ...)" 인용으로 이미 보여준다. 헤딩이 길어서 라벨로 못 보여주면
+        # (label is None) 그냥 버리지 않는다 — 헤딩 자체가 지시문인 경우가 있다
+        # (예: "[다음과 같은 사람은 이 약을 복용하지 말 것] 9) 알코올을 복용한 사람"처럼
+        # 본문은 대상만 나열하고 "복용하지 말 것"이라는 결론은 헤딩에만 있다. 헤딩을
+        # 버리면 그 결론이 통째로 사라져서 "알코올을 복용한 사람"처럼 뭘 하지 말라는
+        # 건지 빠진 문장이 나왔다). 그래서 헤딩이 길면 "헤딩: 본문" 형태로 합쳐서
+        # 다시 쓰기 단계가 지시문을 문장에 녹이게 한다.
+        m = re.match(r"^\[([^\]]*)\]\s*(.*)$", text, re.S)
+        if not m:
+            return text
+        heading, body = m.group(1), m.group(2)
+        if label is not None:
+            return body or heading
+        # 헤딩 자체에 "2. 다음과 같은 사람은..."처럼 조항 번호가 붙어 있으면,
+        # 바깥에서 또 번호를 붙일 때("1. 2. 다음과 같은...") 숫자가 겹쳐 다시 쓰기
+        # LLM이 원문 번호 매기기로 착각해서 손대지 않고 그대로 베끼는 문제가 있었다
+        # (실측). 헤딩의 조항 번호는 여기서는 필요 없으니 뗀다.
+        heading = re.sub(r"^\d+[.)]\s*", "", heading)
+        return f"{heading}: {body}" if body else heading
+
+    bodies = [_body_for_rewrite(t, labels[i]) for i, t in enumerate(evidence_texts)]
     numbered = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(bodies))
     resp = _client.chat.completions.create(
         model=CHAT_MODEL,
@@ -928,11 +1078,10 @@ def _render_bullets(evidence_texts):
 
 
 def _bullets_to_md(bullets):
-    lines = []
-    for b in bullets:
-        prefix = f"(출처: {b['label']}) " if b["label"] else ""
-        lines.append(f"- {prefix}{b['text']}")
-    return "\n".join(lines)
+    # 조항 출처("(출처: 1. 경고)" 등)는 더 이상 문장 앞에 안 붙인다 — 사용자는 어느
+    # 조항에서 나왔는지보다 문장 자체를 바로 읽는 게 더 중요하다는 피드백. 출처 정보는
+    # 답변 맨 아래 데이터 출처 줄(_data_source_line)에서 제품 단위로 한 번만 보여준다.
+    return "\n".join(f"- {b['text']}" for b in bullets)
 
 
 def _plain_bullets(sentences, tag):
@@ -982,9 +1131,13 @@ _PRMSN_UPDATED = _file_date("data/drug_prdt_prmsn_list.jsonl")
 _DUR_UPDATED = _file_date("data/dur_usjnt_taboo.jsonl")
 
 
-def _data_source_line(data_source):
-    """'데이터 출처: ...' 줄에 갱신일을 붙인다. data_source 문구에 "제품허가정보"나
-    "안전사용서비스"가 있으면 그에 맞는 날짜를, 둘 다 없으면 제품허가정보 날짜를 쓴다."""
+def _data_source_line(data_source, item_name=None):
+    """제품명 + 출처 종류 + 갱신일을 한 줄로 보여준다(예: "타이레놀정500밀리그람
+    (의약품안전사용서비스 기준). 갱신일: 2026-09-29"). data_source 문구에
+    "제품허가정보"나 "안전사용서비스"가 있으면 그에 맞는 날짜를, 둘 다 없으면
+    제품허가정보 날짜를 쓴다. item_name이 리스트/튜플이면(병용 확인처럼 제품이
+    여럿인 경우) 쉼표로 묶는다. item_name이 없으면(증상 검색처럼 특정 제품 하나로
+    좁혀지지 않는 경우) 예전처럼 "데이터 출처: ..."로만 쓴다."""
     dates = set()
     if "제품허가정보" in data_source and _PRMSN_UPDATED:
         dates.add(_PRMSN_UPDATED)
@@ -992,11 +1145,21 @@ def _data_source_line(data_source):
         dates.add(_DUR_UPDATED)
     if not dates and _PRMSN_UPDATED:
         dates.add(_PRMSN_UPDATED)
+    if isinstance(item_name, (list, tuple)):
+        item_name = ", ".join(_strip_brackets(n) for n in item_name if n)
+    elif item_name:
+        # 원본 ITEM_NAME 필드에 "(아세트아미노펜)" 같은 성분 표기가 그대로 붙어 있으면
+        # "제품명(성분)(출처 기준)"처럼 괄호가 두 번 겹쳐 보인다. 출처 괄호와 안 겹치게
+        # 성분 표기는 뗀다(요약 문장에서 제품명 쓸 때도 같은 이유로 떼고 있다).
+        item_name = _strip_brackets(item_name)
+    if item_name:
+        suffix = f" 갱신일: {max(dates)}" if dates else ""
+        return f"{item_name}({data_source}).{suffix}"
     suffix = f" (갱신일: {max(dates)})" if dates else ""
     return f"데이터 출처: {data_source}{suffix}"
 
 
-def _assemble_answer(facts, summary, data_source, closing=None):
+def _assemble_answer(facts, summary, data_source, closing=None, item_name=None):
     """답변을 본문(body)과 footer로 나눠서 (body, footer) 튜플로 돌려준다.
     facts/summary를 따로 주고 메인 LLM에게 조립을 맡기면, 라벨을 **굵게**로 바꾸거나
     문단을 빠뜨리거나 근거에 없는 결론("운전은 가능하다" 등)을 덧붙이는 경우가
@@ -1004,12 +1167,12 @@ def _assemble_answer(facts, summary, data_source, closing=None):
     body는 조회된 사실·정리처럼 근거에 따라 매번 달라지는 핵심 내용이고, footer는
     상담 권유·전문의약품 안내·데이터 출처처럼 거의 고정된 문구다. Streamlit에서
     footer를 작은 회색 글씨로 따로 보여주기 위해 나눈다."""
-    # [정리]를 먼저 보여줘서 핵심만 간단히 전달하고, 자세한 근거가 필요하면 아래
+    # 정리(요약)를 먼저 보여줘서 핵심만 간단히 전달하고, 자세한 근거가 필요하면 아래
     # [조회된 사실]에서 확인하도록 순서를 바꿨다(상담 받는 느낌으로 먼저 결론,
-    # 그 다음 근거).
+    # 그 다음 근거). "[정리]" 라벨 자체는 기계적인 느낌을 줘서 빼고 문장만 보여준다.
     body_parts = []
     if summary:
-        body_parts += ["[정리]", summary, ""]
+        body_parts += [summary, ""]
     body_parts += ["[조회된 사실]", facts]
     body = "\n".join(body_parts)
 
@@ -1019,7 +1182,7 @@ def _assemble_answer(facts, summary, data_source, closing=None):
     # 병용금기 등록 등)만 footer에 남긴다.
     closings = [c for c in ([closing] if isinstance(closing, str) else (closing or [])) if c]
     footer = " ".join(closings)
-    footer = (footer + "\n\n" + _data_source_line(data_source)) if footer else _data_source_line(data_source)
+    footer = (footer + "\n\n" + _data_source_line(data_source, item_name)) if footer else _data_source_line(data_source, item_name)
     return body, footer
 
 
@@ -1040,17 +1203,85 @@ def _prescription_closing(item_seq):
     return None
 
 
-_SUMMARY_PROMPT = """아래 조회된 사실을 한 문장으로 짧게 정리하세요. 이것은 요약이지, 다시 말하는 것이 아닙니다.
-- 조건마다 가장 중요한 결론 하나만 고르세요. 한 조건에 여러 주의사항이 있어도 전부 나열하지 말고 제일 중요한 것 하나만 쓰세요.
-- 수치, 예외 상황, 부연 설명, 세부 조건은 빼세요.
-- 조회된 사실에 있는 내용만 쓰세요. 추측이나 새 정보를 더하지 마세요.
-- 조건이 여러 개면 조건마다 고른 결론을 이어 쓰되, 전체를 한 문장, 50자 안팎으로 짧게 끝내세요.
-- 근거가 없다고 나온 조건은 정리에서 굳이 다시 언급하지 않아도 됩니다.
-- 결론의 강도는 조회된 사실 그대로 옮기세요. '안전하다'는 말은 쓰지 마세요.
-- 약사나 의사가 환자에게 직접 설명해주는 말투로, 문장을 "~요"로 끝내세요(예: "~사용돼요", "~주의가 필요해요", "~복용하지 않아야 해요"). "~다"나 "~습니다"로 끝내지 마세요.
+_SUMMARY_PROMPT = """아래 "조회된 사실"만 근거로, 약사가 환자에게 직접 설명해주듯 자연스러운
+상담 답변으로 풀어 쓰세요. 항목을 기계적으로 나열하지 말고, 결론부터 말한 뒤 조회된 사실 문장
+안에 이유나 조건이 이미 들어있으면 그것도 이어지는 문장으로 자연스럽게 설명하세요.
+문장을 여러 개 쓸 때는 각 문장을 뚝뚝 끊어서 나란히 두지 말고, 문장 사이 관계에 맞는 접속어로
+자연스럽게 이어 붙이세요(예: 뒤 문장이 조건이면 "만약 ~라면", 예외나 반대면 "하지만"/"다만",
+같은 맥락을 덧붙이면 "그리고"/"또한"). 접속어 없이 문장만 붙여서 뚝뚝 끊기는 느낌이 나게
+쓰지 마세요. 단, 접속어는 조회된 사실에 실제로 있는 서로 다른 문장·조건들 사이의 관계를
+연결하는 데만 쓰세요. 출처(어디에 근거했는지)는 첫 문장에서 한 번만 밝히면 됩니다(아래
+제품명 규칙 참고) — "그렇게 명시되어 있기 때문이에요"처럼 뒤에 또 이유로 반복하지 마세요.
+"왜 금기인지"에 대한 구체적인 의학적 기전(예: 효과가 감소해서, 상호작용이 발생해서, 간이
+손상돼서)은 조회된 사실 문장에 그 기전이 직접 적혀 있을 때만 쓰세요. 조항 이름(예:
+"상호작용")만 보고 구체적 기전을 추측해서 만들어내지 마세요 — 그 규칙은 아래 [가장 중요한
+규칙]이 여기보다 항상 우선합니다.
 
+[가장 중요한 규칙] 이 약이나 이 상황에 대해 당신이 원래 알고 있는 의학 지식은 전부 무시하세요.
+아래 "조회된 사실"에 실제로 적힌 문장에만 근거해서 쓰세요. "일반적으로 잘 알려진 사실"이라도
+조회된 사실에 그 내용이 없으면 절대 언급하지 마세요. 조회된 사실에 없는 약·성분·상황(예: 질문과
+무관한 음주, 다른 약 이름 등)을 새로 끌어오지 마세요.
+"~때문에", "~때문이에요", "~해서" 같은 이유 표현은 조회된 사실 문장에 그 기전이 실제로
+적혀 있을 때만 쓰세요(예: 사실에 "이러한 사람이 이 약을 복용하면 간손상이 유발될 수 있다"가
+있으면 그 기전을 그대로 설명해도 됩니다). 사실에 없는 구체적 의학적 기전(예: 효과가
+감소해서, 상호작용이 발생해서, 부작용이 발생할 수 있어서, 안전성을 보장할 수 없어서)을
+추측해서 이유로 붙이지 마세요. 출처(어디에 근거했는지)는 첫 문장에서 제품명과 함께 한 번만
+밝히고, "그렇게 명시되어 있기 때문이에요"처럼 뒤에 또 이유로 반복하지 마세요 — 이 규칙은
+답변에 등장하는 모든 문장에 똑같이 적용됩니다. 예를 들어 사실이 "A약, B약, 술과 함께
+사용하지 않는다"처럼 여러 항목을 한 문장에 나열만 하고 있으면(각 항목에 대한 개별 이유가
+없음), "술과 함께 사용하지 않아야 해요. A약, B약과도 마찬가지예요."처럼 이유 표현 없이
+결론만 나열하고, A약·B약 쪽에 "부작용이 발생할 수 있어서" 같은 새 기전을 따로 지어내
+붙이지 마세요. 아래 표현들은 조회된 사실 문장에 그 글자 그대로 적혀 있지 않으면 절대 쓰지
+마세요: "예상치 못한 부작용이 발생할 수 있어서/있으니", "효과가 감소해서", "상호작용이
+발생할 수 있어서", "안전성을 보장할 수 없어서", "그렇게 명시되어 있기 때문이에요". 이런
+표현이 쓰고 싶어지면, 그건 지어내고 있거나 출처를 반복하고 있다는 신호이니 이유 표현 자체를
+빼세요. 마찬가지로 조회된 사실이
+단순 정보(성분·효능효과 등)만 있고 주의사항이 전혀 없으면, "사용 시 주의가 필요해요" 같은
+일반적인 주의 문구를 임의로 덧붙이지 마세요 — 사실에 없으면 아예 언급하지 않는 쪽을 선택하세요.
+- 조회된 사실 안에 위험도가 다른 여러 조건이 구분되어 있으면(예: 특정 조건에서만 주의하라는
+  문장과, 더 강한 금지 문장이 같이 있는 경우) 그 구분을 살려서 설명하세요. 그런 구분이 조회된
+  사실에 없으면 지어내지 마세요.
+- 조회된 사실의 bullet는 이미 사용자 질문에 더 가깝고 직접적인 근거가 먼저, 조건이 붙어
+  더 좁은 근거가 그 다음 순서로 정렬되어 있습니다. 답변 문장도 이 순서를 따라, 먼저 나온
+  근거의 결론을 먼저 말하고 그 다음 근거는 뒤에 보충하듯 이어 쓰세요. bullet 순서를
+  무시하고 두 번째 이후 근거를 먼저 말하지 마세요.
+- 조건마다 핵심 결론을 설명하세요. 한 조건에 여러 주의사항이 있으면 전부 나열하지 말고 가장
+  중요한 내용 위주로 자연스럽게 이어 쓰세요.
+- 분량은 짧게 끝날 수 있으면 한두 문장으로 쓰고, 조회된 사실 자체에 설명할 만한 조건이나
+  이유가 있을 때만 3~4문장으로 늘리세요. 조회된 사실에 없는 내용으로 문장 수를 채우지 마세요.
+- 근거가 없다고 나온 조건은 굳이 다시 언급하지 않아도 됩니다.
+- 조회된 사실에 **조건명** 형태의 굵은 제목이 있으면, 그 제목이 사용자가 실제로 물어본 대상입니다. 근거 문장에 다른 항목이 함께 나열되어 있어도(예: "기침약, 가래약, ..., 술 등과 함께 사용하지 않는다"), 목록의 다른 항목이 아니라 반드시 그 제목(술)을 설명의 중심(주어/대상)으로 쓰세요.
+- 결론의 강도는 조회된 사실 그대로 옮기세요. '안전하다'는 말은 쓰지 마세요. 조회된 사실이
+  특정 조건에서만 주의·상담을 요구하는 조건부 표현이면, 그 조건을 모든 경우로 넓혀서 전면
+  금지처럼 과장하지 마세요. 조회된 사실이 실제로 전면 금지("~하지 않는다" 등)라고 할 때만
+  그렇게 쓰세요.
+- 약사나 의사가 환자에게 직접 설명해주는 말투로, 문장을 "~요"로 끝내세요(예: "~사용돼요", "~주의가 필요해요", "~복용하지 않아야 해요"). "~다"나 "~습니다"로 끝내지 마세요.{product_rule}
+
+조회된 사실:
 {facts}
 """
+
+_SUMMARY_PRODUCT_RULE = """
+- 문장은 반드시 "{item_name}{josa} {source}에 따라, "로 시작하세요. 그 뒤에 조회된
+  사실에 맞는 결론을 자연스럽게 이어 쓰세요(예시는 강도가 아니라 "제품명+출처로 시작한다"는
+  형식만 참고하세요: "{item_name}{josa} {source}에 따라, 특정 상황에서 주의가 필요해요"
+  또는 "{item_name}{josa} {source}에 따라, 이 경우 복용하지 않아야 해요" 등 사실의 실제
+  강도에 맞게 쓰세요). "이 약은" 같은 일반적인 표현 대신 제품명을 직접 쓰세요. 이렇게 첫
+  문장에서 출처를 한 번 밝혔으니, 뒤에 "또한"으로 덧붙이는 문장에는 "그렇게 명시되어 있기
+  때문이에요"처럼 출처를 다시 이유로 대지 마세요 — 반복입니다."""
+
+
+def _josa_eun_neun(word):
+    """단어 마지막 글자의 받침 유무로 '은'/'는'을 고른다. 은/는 선택을 LLM에 맡기면
+    가끔 틀리므로(받침 판단은 기계적으로 정해지는 문제라 LLM이 판단할 필요가 없다)
+    Python에서 미리 정해서 프롬프트에 완성된 조사를 박아 넣는다. 한글이 아닌 글자로
+    끝나면(숫자·영문 등) 받침 유무를 판단하기 어려워 '는'으로 처리한다."""
+    if not word:
+        return "는"
+    code = ord(word[-1]) - 0xAC00
+    if 0 <= code <= 11171:
+        return "은" if code % 28 != 0 else "는"
+    return "는"
 
 
 def _render_facts(conditions_out):
@@ -1070,11 +1301,22 @@ def _render_facts(conditions_out):
     return "\n\n".join(parts)
 
 
-def _make_summary(facts):
+def _make_summary(facts, item_name=None, data_source=None):
+    product_rule = ""
+    if item_name:
+        display_name = _strip_brackets(item_name)
+        # footer의 "데이터 출처: ..."와 같은 값을 재사용한다. 문장 안에 녹일 때는 끝의
+        # " 기준"을 떼서 "~기준에 따라"처럼 어색하게 겹치지 않게 한다("~에 따라" 자체가
+        # 이미 "기준으로"라는 뜻이라 "기준"이 중복된다).
+        source = re.sub(r"\s*기준\s*$", "", data_source) if data_source else "식약처 등록 정보"
+        product_rule = _SUMMARY_PRODUCT_RULE.format(
+            item_name=display_name, josa=_josa_eun_neun(display_name), source=source
+        )
+    prompt = _SUMMARY_PROMPT.format(facts=facts, product_rule=product_rule)
     resp = _client.chat.completions.create(
         model=CHAT_MODEL,
         temperature=0,
-        messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(facts=facts)}],
+        messages=[{"role": "user", "content": prompt}],
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -1101,7 +1343,7 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         def _evidence_for(c):
             raw = search_paragraphs(item_seq, field, c, top_k=8)
             paras = _pick_with_relevance_check(c, raw)
-            paras = _attach_body(paras, _get_paragraphs(item_seq, field))
+            paras = _attach_body(paras, _get_paragraphs(item_seq, field), condition=c)
             return c, paras
 
         with ThreadPoolExecutor(max_workers=len(conditions)) as pool:
@@ -1119,8 +1361,8 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
         if not found:
             return _no_evidence_result(item_name, closing=rx_closing)
         facts = _render_facts(conditions_out)
-        summary = _make_summary(facts)
-        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
+        summary = _make_summary(facts, item_name=item_name, data_source="의약품 제품허가정보 기준")
+        answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing, item_name=item_name)
         return {
             "resolved": True,
             "item_name": item_name,
@@ -1143,12 +1385,17 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     # 맞는 것처럼 잘못 고르는 경우가 재현됐다(조건별 경로는 이미 깨끗한 문장을 쓴다).
     condition_text = conditions[0] if conditions else question
     picked = _pick_with_relevance_check(condition_text, paragraphs)
-    picked = _attach_body(picked, _get_paragraphs(item_seq, field))
+    picked = _attach_body(picked, _get_paragraphs(item_seq, field), condition=condition_text)
     if not picked:
         return _no_evidence_result(item_name, closing=rx_closing)
-    facts = _bullets_to_md(_render_bullets([p["text"] for p in picked]))
-    summary = _make_summary(facts)
-    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
+    # 근거 문장 하나에 여러 항목이 나열된 경우(예: "기침약, 가래약, ..., 술 등과
+    # 함께 사용하지 않는다"), 조건 제목 없이 요약을 시키면 LLM이 사용자가 실제로
+    # 물어본 항목(술)이 아니라 목록의 첫 항목(기침약)을 주어로 골라버리는 문제가
+    # 재현됐다. 조건별 경로(_render_facts)와 똑같이 **조건명** 제목을 붙여서 요약이
+    # 반드시 그 조건을 주어로 삼게 한다.
+    facts = f"**{condition_text}**\n{_bullets_to_md(_render_bullets([p['text'] for p in picked]))}"
+    summary = _make_summary(facts, item_name=item_name, data_source="의약품 제품허가정보 기준")
+    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing, item_name=item_name)
     return {
         "resolved": True,
         "item_name": item_name,
@@ -1159,13 +1406,15 @@ def _tool_ask_lifestyle_question(product_name, question, field="NB"):
     }
 
 
-def _no_evidence_result(item_name, closing=None):
-    # 근거가 없으면 LLM이 제각각 말하지 않도록 문장을 코드에서 고정한다.
-    sentence = (f"{item_name}의 사용상주의사항에는 질문하신 내용과 관련된 주의사항이 없습니다. "
-                "일반적으로 특별한 금기사항은 알려져 있지 않습니다. "
-                "다만 개인의 상태에 따라 다를 수 있으니, 불편하시면 약사와 상담하시기 바랍니다.")
+def _no_evidence_result(item_name, closing=None, topic="질문하신 내용", data_source="의약품 제품허가정보 기준"):
+    # 근거가 없으면 LLM이 제각각 말하지 않도록 문장을 코드에서 고정한다. topic을 주면
+    # ("임부·수유부" 등) 뭘 못 찾았는지 구체적으로 밝히고, 안 주면 기존처럼 "질문하신
+    # 내용"으로 뭉뚱그린다.
+    sentence = (f"{item_name}의 사용상주의사항에는 {topic} 관련 주의사항이 없습니다만, "
+                "개인의 상태에 따라 다를 수 있으니 복용 후 평소와 다른 증상이 나타나면 "
+                "의사나 약사와 상담하시기 바랍니다.")
     footer = f"{closing}\n\n" if closing else ""
-    footer += _data_source_line("의약품 제품허가정보 기준")
+    footer += _data_source_line(data_source, item_name)
     return {
         "resolved": True,
         "item_name": item_name,
@@ -1193,8 +1442,8 @@ def _tool_get_overdose_info(product_name):
     if not overdose_sentences:
         return _no_evidence_result(item_name, closing=rx_closing)
     facts = _plain_bullets(overdose_sentences, "과량투여")
-    summary = _make_summary(facts)
-    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing)
+    summary = _make_summary(facts, item_name=item_name, data_source="의약품 제품허가정보 기준")
+    answer, footer = _assemble_answer(facts, summary, "의약품 제품허가정보 기준", closing=rx_closing, item_name=item_name)
     return {
         "resolved": True,
         "item_name": item_name,
@@ -1243,6 +1492,17 @@ class Conversation:
 
     def __init__(self):
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # 브랜드명(예: "타이레놀") -> 되묻기로 확정된 구체적 제품명(예: "타이레놀정500밀리그람").
+        # 한 번 확정되면 대화가 끝날 때까지 그 브랜드명이 다시 나올 때마다 매번 다시
+        # 되묻지 않고 이 제품으로 바로 해석한다. 사용자가 같은 계열의 다른 구체적
+        # 제품명을 직접 말하면 그 이름은 이 사전의 키와 다른 문자열이라 그대로
+        # 통과하고, 이 사전 자체는 바뀌지 않는다.
+        self.product_pins = {}
+        # 바로 직전 도구 호출이 제품을 특정하지 못해 되물은 경우, 그때 쓰인(치환 전)
+        # 브랜드명. 사용자가 그 되묻기에 바로 답해서 이번 턴에 제품이 특정되면 이
+        # 브랜드명을 product_pins에 등록한다. 되묻기에 답하지 않고 다른 질문으로
+        # 넘어가면(= 이번 턴이 되묻기 응답이 아니면) 버린다.
+        self._pending_unresolved_name = None
 
     def send(self, user_message: str, max_tool_rounds: int = 5) -> dict:
         """반환값은 {"text": 핵심 답변, "footer": 상담 권유·안내·데이터 출처(없으면
@@ -1262,6 +1522,14 @@ class Conversation:
         # question을 채우거나 질문 의도를 키워드로 판단할 때는 이걸 쓰고, 감정·긴급
         # 상황 감지처럼 "지금 이 문장 자체"가 중요한 곳에는 user_message를 그대로 쓴다.
         question_context = _effective_question(self.messages, user_message)
+
+        # 이번 턴이 직전 되묻기("...말씀하시는 건가요?")에 대한 답인지. 맞으면 이번
+        # 턴에 제품이 특정될 때 self._pending_unresolved_name을 브랜드명 고정(핀)으로
+        # 등록한다. 아니면(사용자가 되묻기를 무시하고 다른 질문으로 넘어간 경우)
+        # 남아있던 pending은 더 이상 유효하지 않으므로 버린다.
+        is_clarification_reply = _is_clarification_reply(self.messages)
+        if not is_clarification_reply:
+            self._pending_unresolved_name = None
 
         overdose_intent = any(k in user_message for k in _OVERDOSE_KEYWORDS)
         overdose_forced = False
@@ -1292,6 +1560,7 @@ class Conversation:
                 return {"text": content, "footer": footer}
 
             self.messages.append(msg)
+            dispatch_cache = {}
             for tool_call in msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments)
@@ -1316,8 +1585,10 @@ class Conversation:
                     # (그쪽이 NB·UD 원문에서 더 구체적인 답을 찾는다).
                     fn_name = "get_drug_info"
                     fn_args = {"product_name": fn_args["product_name"], "question": question_context}
+                if fn_name == "get_drug_info":
+                    _conditions = extract_conditions(question_context, CHAT_MODEL)
                 if fn_name == "get_drug_info" and (
-                    len(extract_conditions(question_context, CHAT_MODEL)) >= 2
+                    len(_conditions) >= 2
                     or _DURATION_OR_AMOUNT_RE.search(question_context)
                 ):
                     # 조건이 두 개 이상이면 DUR 전문 조회로는 조건별 근거를 보장할 수 없다.
@@ -1328,12 +1599,75 @@ class Conversation:
                     # 나이 질문은 연령 DUR 항목 원문으로 답한다. 전체 조회 결과를 주면 원문에 없는 결론이 섞인다.
                     fn_name = "get_age_dur_info"
                     fn_args = {"product_name": fn_args["product_name"], "question": question_context}
+                if (
+                    fn_name == "get_drug_info"
+                    and _info_scope(question_context) is None
+                    and _conditions
+                    and not _dur_type_for_question(question_context)
+                ):
+                    # 범위를 특정하지 않은 일반 질문인데 구체적인 생활 조건(술 등)이 하나라도
+                    # 있으면 전체 덤프가 아니라 ask_lifestyle_question이 맞다(7-(2) 규칙).
+                    # 되묻기에 제품명만 답한 경우, 모델이 원래 조건을 다시 반영해 호출하지
+                    # 않고 get_drug_info를 직접 부르는 경우가 재현됐다(예: "게보린
+                    # 술마시고 먹어도 돼?" -> 되묻기 -> "게보린정"만 답하면 모델이
+                    # get_drug_info(게보린정)을 불러서, scope=None이라 전체 덤프가 나오고
+                    # "술" 맥락이 묻혔다). 조건이 이미 2개 이상이거나 나이 질문이면 위에서
+                    # 먼저 처리되므로 여기 오지 않는다. _dur_type_for_question이 맞으면
+                    # 바로 위(1472줄)의 reroute가 "DUR 항목이 NB 전문 검색보다 더 정확하다"는
+                    # 이유로 일부러 get_drug_info에 머물게 한 것이므로, 여기서 다시
+                    # ask_lifestyle_question으로 되돌리면 그 reroute가 무의미해진다.
+                    fn_name = "ask_lifestyle_question"
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
                 if fn_name == "get_drug_info":
                     # 질문 문맥에 따라 사용상주의사항 중 관련 문단과 DUR 유형을 고르려면 원래
                     # 질문이 필요하다. 모델이 실제로 넘긴 건 product_name뿐이라 직접 채운다.
                     fn_args = {"product_name": fn_args["product_name"], "question": question_context}
-                fn = TOOL_DISPATCH.get(fn_name)
-                result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
+                if fn_name == "ask_lifestyle_question":
+                    # 질문에 조건이 여러 개 섞여 있으면("운전해도 되고 임산부도 먹어도 돼?")
+                    # 모델이 조건별로 ask_lifestyle_question을 따로따로(한 번에 여러
+                    # tool_call) 호출하는 경우가 재현됐다. 도구 내부(extract_conditions)가
+                    # 이미 원래 질문 하나로 조건을 전부 나눠 처리하므로, 항상
+                    # question_context(원래 질문 전체)로 통일해서 모델이 자기 방식대로
+                    # 쪼갠 질문 대신 도구가 한 번에 전부 처리하게 한다.
+                    fn_args = {"product_name": fn_args["product_name"], "question": question_context}
+                # 브랜드명(예: "타이레놀")이 이미 product_pins에 구체적 제품으로 고정돼
+                # 있으면, 다시 되묻지 않고 그 제품으로 바로 치환한다. 치환 전 이름은
+                # 아래 핀 등록에 쓰려고 따로 남겨 둔다.
+                orig_product_name = fn_args.get("product_name")
+                if orig_product_name is not None:
+                    pinned = self.product_pins.get(orig_product_name.strip())
+                    if pinned:
+                        fn_args["product_name"] = pinned
+                if "product_names" in fn_args:
+                    fn_args["product_names"] = [
+                        self.product_pins.get(n.strip(), n) for n in fn_args["product_names"]
+                    ]
+
+                # 위 통일 때문에 조건이 여러 개면 서로 다른 tool_call들이 결국 같은
+                # (fn_name, fn_args)로 수렴한다. 그대로 두면 똑같은 조회를 여러 번
+                # 반복하고, 호출이 여럿이라는 이유만으로 아래 shortcut이 꺼져서 결과를
+                # 다시 LLM이 조립하다가 굵은 제목 같은 형식이 흔들린다. 라운드 안에서
+                # (fn_name, fn_args)가 같으면 한 번만 실제로 호출하고 결과를 재사용한다.
+                dispatch_key = (fn_name, json.dumps(fn_args, sort_keys=True, ensure_ascii=False))
+                if dispatch_key in dispatch_cache:
+                    result = dispatch_cache[dispatch_key]
+                else:
+                    fn = TOOL_DISPATCH.get(fn_name)
+                    result = fn(**fn_args) if fn else {"error": f"unknown tool {fn_name}"}
+                    dispatch_cache[dispatch_key] = result
+
+                # 브랜드명 고정(핀) 갱신. product_name(단일 제품 도구)에만 적용한다 —
+                # check_drug_interactions처럼 product_names(목록)인 경우는 어떤
+                # 브랜드명이 어떤 제품으로 풀렸는지 1:1로 대응시키기 애매해서 범위를
+                # 좁힌다.
+                if orig_product_name is not None and isinstance(result, dict):
+                    if result.get("item_name"):
+                        if is_clarification_reply and self._pending_unresolved_name:
+                            self.product_pins[self._pending_unresolved_name.strip()] = result["item_name"]
+                        self._pending_unresolved_name = None
+                    elif result.get("clarification_question") or result.get("candidate_groups"):
+                        self._pending_unresolved_name = orig_product_name
+
                 if fn_name == "ask_lifestyle_question":
                     last_lifestyle_result = result
                 last_tool_name = fn_name
@@ -1344,7 +1678,7 @@ class Conversation:
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 })
 
-            if len(msg.tool_calls) == 1 and isinstance(last_tool_result, dict) and "answer" in last_tool_result:
+            if len(dispatch_cache) == 1 and isinstance(last_tool_result, dict) and "answer" in last_tool_result:
                 # 도구가 이미 answer(+footer)를 완성해 줬다. 한 번 더 모델을 불러
                 # "그대로 출력"을 시키면, 모델이 옮겨 적는 과정에서 줄바꿈이나 라벨이
                 # 가끔 흔들렸다. 모델에게 다시 쓰게 하지 않고 Python이 그 문자열로

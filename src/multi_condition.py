@@ -34,7 +34,17 @@ _EXTRACT_PROMPT = """사용자 질문: "{question}"
 
 
 def extract_conditions(question, model):
-    """질문의 조건 목록을 반환한다. 파싱에 실패하면 질문 전체를 하나의 조건으로 본다."""
+    """질문의 조건 목록을 반환한다. 파싱에 실패하면(모델 응답에서 JSON 배열을 못
+    찾았거나 JSON이 깨졌으면) 질문 전체를 하나의 조건으로 본다.
+
+    모델이 "조건이 전혀 없다"고 의도적으로 빈 배열 []을 돌려준 경우에는(프롬프트에
+    "성분이 뭐야"처럼 단순 정보 질문이면 빈 배열을 내라고 명시해 뒀다) 그대로 빈
+    리스트를 돌려준다 — 예전에는 이것도 파싱 실패와 똑같이 [question]으로
+    되돌렸는데, 그러면 "지르텍정 먹어도 되나요?"처럼 진짜 조건이 없는 일반 질문도
+    "조건이 1개 있다"고 잘못 보여서, get_drug_info의 전체 답변을 ask_lifestyle_question의
+    좁은 답변으로 잘못 되돌리는 라우팅 버그가 생겼다(실측). 호출하는 쪽
+    (_tool_ask_lifestyle_question 등)은 이미 "조건이 없으면 question 전체를 쓴다"는
+    자기 자신의 fallback을 갖고 있어서, 여기서 또 [question]으로 바꿔줄 필요가 없다."""
     resp = _get_client().chat.completions.create(
         model=model,
         temperature=0,
@@ -48,8 +58,7 @@ def extract_conditions(question, model):
         items = json.loads(match.group(0))
     except json.JSONDecodeError:
         return [question]
-    items = [str(x).strip() for x in items if str(x).strip()]
-    return items or [question]
+    return [str(x).strip() for x in items if str(x).strip()]
 
 
 def search_by_conditions(item_seq, field, conditions, top_k=8):
