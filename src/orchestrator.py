@@ -302,6 +302,25 @@ SYSTEM_PROMPT = """당신은 식약처 공공데이터를 조회해서 사실을
     제품이 특정된 뒤 ask_lifestyle_question(NB)으로 과량투여 관련 원문을 찾아 그대로
     전달하세요. 제품이 특정되지 않았으면 제품부터 되물으세요. 지금 증상이 심하다고
     하면 119 연락을 먼저 안내하고, 그 다음에 원문 내용을 덧붙이세요.
+12. 질문이 의약품·복약과 전혀 관련이 없는 "새로운 주제"면(예: 날씨, 시사·정치,
+    스포츠, 연예인, 요리법, 코딩, 수학 문제, "너는 누구야"/"넌 AI야?" 같은 신상
+    질문, 농담·잡담 요청 등) 어떤 도구도 호출하지 말고, 다른 말을 덧붙이지 말고
+    정확히 이 문장만 그대로 답하세요: "복약 관련 정보만 도와드릴 수 있어요."
+    이 규칙은 새로운 무관한 주제를 꺼낼 때만 적용되는 것이며, 아래처럼 직전
+    대화에 대한 짧은 반응일 때는 절대 적용하지 마세요(이런 경우는 새 주제가
+    아니라 방금 나눈 대화의 연속입니다):
+    - "고마워", "감사합니다", "네 알겠습니다", "오 신기하네" 같은 인사·감사·
+      맞장구: 가볍게 자연스러운 한 문장으로 응대하세요(도구 호출 불필요).
+    - "그게 무슨 뜻이야?", "왜 그런거야?" 처럼 직전 답변 내용을 더 설명해
+      달라는 질문: 이미 가진 정보로 자연스럽게 설명하세요.
+    - 증상·질병·신체 상태·의학 용어의 뜻을 묻는 질문은 전부 예외입니다. 예:
+      "현훈이 뭐야", "오한이 뭐야", "구안와사가 뭐야", "역류성식도염이 뭐야",
+      "돌발성 난청이 뭐야" — 이런 용어는 아무리 낯설어도, 또 목록에 없는
+      이름이어도 전부 신체 증상·질병이면 이 예외에 해당합니다(목록은 예시일
+      뿐 전체가 아닙니다). 식약처 제품 데이터로 답할 질문이 아니라 사전적
+      설명이므로 이 규칙 대상이 아니니, 아는 대로 짧게 설명하세요.
+      (이 예외는 "이 용어가 뜻하는 게 뭐냐"는 질문에만 적용되고, 그 증상에
+      먹을 약을 추천해달라는 질문은 여전히 위 도구들을 정상적으로 쓰세요.)
 """
 
 TOOLS = [
@@ -552,6 +571,10 @@ _INFO_SCOPE_KEYWORDS = {
     "ingredients": ("성분", "주성분", "원료"),
     "efficacy": ("효능", "효과"),
     "usage": ("용법", "용량", "복용법", "몇 알", "몇 정", "어떻게 먹", "먹는 법"),
+    # "중지"는 빼둔다 — "복용 중지해야 하나요?"처럼 약을 그만 먹는다는 뜻으로도 많이
+    # 쓰여서, "판매 중지" 의도가 아닌데도 이 범위로 잘못 좁혀질 위험이 있다. "판매"
+    # 자체가 "판매중지"/"판매 중지"/"판매되고 있어" 전부를 이미 포함하므로 충분하다.
+    "sale_status": ("판매", "취하", "회수", "구할 수", "살 수 있"),
 }
 
 
@@ -622,6 +645,13 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
             f"- (판매 상태) 이 제품은 {detail.get('cancel_date')}자로 {detail['cancel_name']} 처리되어 "
             "더 이상 정상적으로 판매되지 않습니다. 복용 중이라면 약사나 의사와 상담하세요."
         )
+    elif scope == "sale_status":
+        # "판매 중지됐어?"처럼 판매 상태를 콕 집어 물었는데 정상 판매 중이면, 범위를
+        # 좁혀 물은 것과 같으니 그 사실만 답하고 아래 성분/효능효과/용법용량/주의사항
+        # 전부는 보여주지 않는다(실측: 판매 상태만 물었는데 혈압약 용법용량·DUR
+        # 임부금기까지 전부 나왔다). 정상이 아니면 위 분기에서 이미 처리했으므로
+        # 이 분기는 "정상인데 콕 집어 물은 경우"만 해당한다.
+        basic.append("- (판매 상태) 이 제품은 정상적으로 판매되고 있습니다.")
     if scope in (None, "ingredients") and not dtype and detail.get("ingredients"):
         basic.append(f"- (성분) {', '.join(detail['ingredients'])}")
     if scope in (None, "ingredients", "efficacy") and not dtype:
@@ -703,18 +733,21 @@ def _tool_get_drug_info(product_name, question="", build_answer=True):
         if detail.get("has_interaction_data")
         else "의약품 제품허가정보 기준"
     )
-    # cancel_name이 "정상"이면 필드 자체를 안 보여준다. 프롬프트로 "정상이면
-    # 언급하지 마라"고 아무리 명시해도 LLM이 "이 제품은 정상적으로 판매되고
-    # 있습니다"를 계속 붙이는 걸 반복 확인함 — 볼 수 없는 값은 언급할 수 없으니
-    # 아예 지워서 원천 차단한다.
-    if detail.get("cancel_name") == "정상":
-        detail.pop("cancel_name", None)
-        detail.pop("cancel_date", None)
     if not build_answer:
         # get_age_dur_info처럼 dur_cautions 등 원본 필드만 필요한 내부 호출.
         # 매번 답변 문장까지 조립하면 search_paragraphs·LLM 호출이 낭비된다.
         return detail
+    # _build_drug_info_answer는 "판매 중지됐어?"처럼 판매 상태를 콕 집어 물은
+    # 경우 cancel_name이 "정상"이어도 그 사실을 답에 넣어야 하므로, 아직 지우지
+    # 않은 상태로 넘긴다. answer를 만든 뒤에야(cancel_name이 "정상"이면) 지운다 —
+    # 프롬프트로 "정상이면 언급하지 마라"고 아무리 명시해도 LLM이 "이 제품은
+    # 정상적으로 판매되고 있습니다"를 다른 질문에까지 계속 붙이는 걸 반복
+    # 확인함(이 shortcut이 꺼져서 두 번째 LLM 라운드가 원본 JSON을 다시 보는
+    # 경우). 볼 수 없는 값은 언급할 수 없으니 answer 조립이 끝나면 지운다.
     detail["answer"], detail["footer"] = _build_drug_info_answer(item_seq, detail, question, detail["data_source"])
+    if detail.get("cancel_name") == "정상":
+        detail.pop("cancel_name", None)
+        detail.pop("cancel_date", None)
     detail["note"] = _ANSWER_NOTE
     return detail
 
@@ -723,7 +756,7 @@ def _tool_get_age_dur_info(product_name, question):
     detail = _tool_get_drug_info(product_name, build_answer=False)
     if not detail.get("resolved"):
         return detail
-    group = _age_group(question)
+    group = _age_group(_strip_product_name(question, product_name))
     types = _AGE_DUR_TYPES.get(group, ())
     entries = [d for d in detail.get("dur_cautions", []) if d.get("type") in types]
     if not entries:
@@ -995,6 +1028,18 @@ _DURATION_OR_AMOUNT_RE = re.compile(r"(\d+|한|두|세|네|다섯)\s*(일|주|�
 # 나이 질문은 DUR 항목의 원문을 코드에서 그대로 옮긴다. 사용상주의사항 전체를 LLM에 넘기면
 # 여러 연령 문장이 섞여 "사용할 수 있다"처럼 원문에 없는 결론이 나왔다.
 _AGE_DUR_TYPES = {"elderly": ("노인주의",), "child": ("특정연령대금기",)}
+
+
+def _strip_product_name(text, product_name):
+    """나이 등 키워드 판단 전에 질문에서 제품명을 떼어낸다. question에는 제품명이
+    그대로 포함돼 있는데(사용자가 "OO정 ~"처럼 제품명과 질문을 같이 치므로),
+    제품명 자체에 우연히 판단 키워드와 같은 글자가 들어있으면(실측: "티엘트레노인
+    20연질캡슐"의 "트레노인" 안에 "노인"이 부분 문자열로 들어있어 나이 질문이
+    아닌데도 "노인" 질문으로 오판했다) 질문 내용이 아니라 제품명 때문에 키워드가
+    잘못 발동한다. product_name을 알고 있으면 그 부분을 지우고 나머지만 검사한다."""
+    if not product_name:
+        return text
+    return text.replace(product_name, "")
 
 
 def _age_group(question):
@@ -1595,7 +1640,7 @@ class Conversation:
                     # 생활질문 경로에서 조건마다 따로 검색한다.
                     fn_name = "ask_lifestyle_question"
                     fn_args = {"product_name": fn_args["product_name"], "question": question_context}
-                if fn_name == "get_drug_info" and _age_group(question_context):
+                if fn_name == "get_drug_info" and _age_group(_strip_product_name(question_context, fn_args["product_name"])):
                     # 나이 질문은 연령 DUR 항목 원문으로 답한다. 전체 조회 결과를 주면 원문에 없는 결론이 섞인다.
                     fn_name = "get_age_dur_info"
                     fn_args = {"product_name": fn_args["product_name"], "question": question_context}
