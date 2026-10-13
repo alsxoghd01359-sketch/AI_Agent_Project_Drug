@@ -4,11 +4,31 @@
     streamlit run src/streamlit_app.py
 데이터 경로가 상대경로("data/...")라서 반드시 프로젝트 루트에서 실행해야 한다.
 """
+import time
+
 import streamlit as st
 
-from orchestrator import Conversation, warmup
+from orchestrator import Conversation
 
 st.set_page_config(page_title="AI 복약 정보 도우미", page_icon="💊")
+
+# 배경·포인트 색(진한 티얼~블루 그라데이션)은 로딩 화면과 채팅 화면 둘 다에서
+# 똑같이 쓴다 — 로딩 화면에서 봤던 색이 채팅 화면으로 넘어갈 때 안 바뀌어야
+# "같은 앱"이라는 느낌이 유지된다.
+_BG_DARK = "#050a09"
+_BG_RADIAL = "#0d1f1c"
+_RING_START = "#2F8FFF"
+_RING_END = "#30E3B3"
+_TEXT = "#EAF6F3"
+
+_SHARED_CSS = f"""
+<style>
+.stApp {{
+    background: radial-gradient(circle at 50% 35%, {_BG_RADIAL} 0%, {_BG_DARK} 70%);
+}}
+</style>
+"""
+st.markdown(_SHARED_CSS, unsafe_allow_html=True)
 
 
 def _md_safe(text):
@@ -22,16 +42,140 @@ def _md_safe(text):
     return text
 
 
-@st.cache_resource
-def _warmup():
-    # drug_lookup/paragraph_search/name_match의 지연 로딩 데이터를 앱 시작 시 한 번만
-    # 불러온다(실측 약 20초). st.cache_resource로 감싸서 Streamlit이 스크립트를 다시
-    # 실행할 때마다(위젯 조작 등) 매번 다시 부르지 않게 한다.
-    warmup()
-    return True
+# SVG 원형 링(stroke-dasharray/dashoffset 방식) 치수. conic-gradient 방식은 끝이
+# 각지게 잘려서(stroke-linecap 같은 게 없음) 사용자가 지적한 "부자연스러움"의
+# 원인이었다 — SVG circle + stroke-linecap:round로 바꾸면 끝이 둥글게 마감된다.
+_RING_R = 92
+_RING_CIRC = 2 * 3.141592653589793 * _RING_R  # 둘레(=stroke-dasharray 전체 길이)
 
 
-_warmup()
+def _ring_svg(offset_expr: str) -> str:
+    """offset_expr: stroke-dashoffset에 들어갈 CSS 값(고정값 또는 keyframe 변수명).
+
+    모든 줄을 들여쓰기 없이(칸 0부터) 이어 붙인다 — st.markdown은 내부적으로
+    마크다운 파서를 거치는데, 줄 앞에 공백이 4칸 이상 있으면 HTML이 아니라
+    "들여쓰기된 코드 블록"으로 해석해서 태그가 그대로 글자로 보이는 문제가
+    실제로 있었다(알약 div가 텍스트로 그대로 노출된 원인)."""
+    return (
+        f'<svg width="220" height="220" viewBox="0 0 220 220" style="transform: rotate(-90deg);">'
+        f'<defs><linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">'
+        f'<stop offset="0%" stop-color="{_RING_START}" />'
+        f'<stop offset="100%" stop-color="{_RING_END}" />'
+        f'</linearGradient></defs>'
+        f'<circle cx="110" cy="110" r="{_RING_R}" fill="none" stroke="#ffffff14" stroke-width="16" />'
+        f'<circle class="ring-progress" cx="110" cy="110" r="{_RING_R}" fill="none" stroke="url(#ringGrad)" '
+        f'stroke-width="16" stroke-linecap="round" '
+        f'stroke-dasharray="{_RING_CIRC:.2f}" stroke-dashoffset="{offset_expr}" />'
+        f'</svg>'
+    )
+
+
+def _loading_html(phase: str) -> str:
+    """로딩 화면 한 단계를 그린다.
+
+    phase="fill": 실제 로딩이 정확히 몇 초 걸릴지는 알 수 없으니, 약 20초에 걸쳐
+    90%까지만 서서히(ease-out) 채우고 거기서 멈춘다 — 100%까지 미리 채워버리면
+    "다 끝났다"는 거짓 신호가 되기 때문에 90%를 상한으로 둔다.
+    phase="done": 실제로 전부 끝난 시점에 90% -> 100%를 짧게(0.5초) 채워서
+    "방금 끝났다"는 걸 보여준 뒤 채팅 화면으로 넘어간다.
+    """
+    if phase == "fill":
+        start_offset = _RING_CIRC
+        end_offset = _RING_CIRC * 0.10  # 90% 채움
+        duration = "20s"
+        timing = "cubic-bezier(0.15, 0.6, 0.25, 1)"  # 갈수록 느려짐(ease-out), 자연스러운 감속
+    else:
+        start_offset = _RING_CIRC * 0.10
+        end_offset = 0  # 100% 채움
+        duration = "0.7s"
+        # easeOutExpo류 곡선: 처음엔 휙 빠르게 움직이다 끝에서 부드럽게 멎는다.
+        # "ease-out"(선형에 가까움)이었을 땐 거의 순간이동처럼 "띡" 채워지는
+        # 느낌이었는데, 이 곡선은 움직임 자체가 눈에 보이면서도 급정거하지 않는다.
+        timing = "cubic-bezier(0.16, 1, 0.3, 1)"
+
+    return f"""
+<style>
+.loading-wrap {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 70vh;
+}}
+.ring-box {{
+    position: relative;
+    width: 220px;
+    height: 220px;
+    filter: drop-shadow(0 0 14px {_RING_END}55);
+}}
+.ring-progress {{
+    animation: fillRing {duration} {timing} forwards;
+}}
+@keyframes fillRing {{
+    0%   {{ stroke-dashoffset: {start_offset:.2f}; }}
+    100% {{ stroke-dashoffset: {end_offset:.2f}; }}
+}}
+.pill-overlay {{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}}
+.pill {{
+    width: 72px;
+    height: 34px;
+    border-radius: 17px;
+    background: linear-gradient(135deg, {_RING_END} 0%, {_RING_END} 48%, #ffffff 52%, #ffffff 100%);
+    box-shadow: 0 0 10px {_RING_END}88;
+    transform: rotate(-45deg);
+}}
+.loading-text {{
+    margin-top: 28px;
+    color: {_TEXT};
+    font-size: 1.05rem;
+    letter-spacing: 0.02em;
+}}
+.dots span {{
+    display: inline-block;
+    opacity: 0;
+    animation: dotfade 1.4s infinite;
+}}
+.dots span:nth-child(1) {{ animation-delay: 0s; }}
+.dots span:nth-child(2) {{ animation-delay: 0.25s; }}
+.dots span:nth-child(3) {{ animation-delay: 0.5s; }}
+@keyframes dotfade {{
+    0%, 80%, 100% {{ opacity: 0; }}
+    35% {{ opacity: 1; }}
+}}
+</style>
+<div class="loading-wrap"><div class="ring-box">{_ring_svg(f"{start_offset:.2f}")}<div class="pill-overlay"><div class="pill"></div></div></div><div class="loading-text">의약품 정보를 불러오고 있습니다<span class="dots"><span>.</span><span>.</span><span>.</span></span></div></div>
+"""
+
+
+if "app_ready" not in st.session_state:
+    st.session_state.app_ready = False
+
+if not st.session_state.app_ready:
+    # drug_lookup/paragraph_search/name_match의 지연 로딩 데이터를 여기서 미리
+    # 불러온다(실측 약 27초). orchestrator.warmup()과 같은 일을 하지만, 로딩
+    # 화면을 띄운 채로 불러와야 해서 그 안의 세 호출을 여기서 직접 부른다.
+    from drug_lookup import _ensure_loaded as _load_drug_lookup
+    from paragraph_search import _ensure_detail_loaded as _load_paragraph_detail
+    from name_match import _load_index as _load_name_index
+
+    placeholder = st.empty()
+
+    placeholder.markdown(_loading_html("fill"), unsafe_allow_html=True)
+    _load_drug_lookup()
+    _load_paragraph_detail()
+    _load_name_index()
+
+    placeholder.markdown(_loading_html("done"), unsafe_allow_html=True)
+    time.sleep(0.6)  # 100% 채워진 모습을 짧게라도 보여준 뒤 채팅 화면으로 넘어간다
+
+    st.session_state.app_ready = True
+    st.rerun()
 
 st.title("AI 복약 정보 도우미")
 st.caption(

@@ -33,6 +33,13 @@ _OVERDOSE_KEYWORDS = ("과다", "과량", "한꺼번에")
 # 기본값 false — 이 줄 또는 .env의 SCORE_DEBUG 설정만 지우면 이 기능은 완전히 비활성화된다.
 SCORE_DEBUG = os.getenv("SCORE_DEBUG", "false").strip().lower() in ("1", "true", "yes")
 
+# ask_lifestyle_question의 2차 관련도 재확인(_pick_with_relevance_check) on/off.
+# .env의 RELEVANCE_CHECK_ENABLED=true/false로 켜고 끈다(코드 수정 불필요, 비교
+# 실험용). 기본값 true(기존 동작) — false면 1차 검색 결과를 재확인 없이 그대로
+# 쓴다(실측: 심바로드정20밀리그램 x "간이 안좋은데"에서 꺼보면 갈락토오스
+# 불내성·근육병증/CYP3A4 상호작용처럼 간질환과 무관한 사실까지 그대로 끼어든다).
+RELEVANCE_CHECK_ENABLED = os.getenv("RELEVANCE_CHECK_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
 _NO_ANSWER_MARKERS = ("찾을 수 없습니다", "등록되어 있지 않습니다", "등록된 정보가 없습니다")
 
 _CITATION_FOLLOWUP_PROMPT = """질문: "{question}"
@@ -961,6 +968,8 @@ def _pick_with_relevance_check(condition, raw):
     응답 단계에서 가끔 걸러졌지만, 그 단계를 없앤 뒤로는 그대로 새어 나갔다).
     고른 게 없을 때는 상위 문단 중에 실제로 대상을 다루는 게 있는지 봐서,
     _pick_for_condition이 너무 엄격했던 경우를 보완한다."""
+    if not RELEVANCE_CHECK_ENABLED:
+        return raw
     picked = _pick_for_condition(condition, raw)
     if picked:
         # 이미 고른 문단 전체를 다시 확인한다(일부만 보면 뒤쪽에 있는 정상적인

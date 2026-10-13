@@ -38,6 +38,27 @@ import chroma_setup
 DATA_DIR = Path("data")
 EMBED_MODEL = "text-embedding-3-large"
 
+# 2단계 LLM 재랭킹을 켜고 끄는 토글(.env의 RERANK_ENABLED=true/false, 코드 수정
+# 없이 전환). 꺼면 1단계 임베딩 유사도 점수 순서 그대로 top_k를 반환한다 —
+# 재랭킹이 결과를 얼마나 바꾸는지 비교 실험용. 기본값 true(기존 동작 유지).
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
+# 검색 결과 순위를 콘솔(stderr)에 찍을지 여부(.env의 RANK_DEBUG=true/false). 채팅
+# 답변/footer에는 전혀 안 섞이고(SCORE_DEBUG와 독립적인 별도 토글) 터미널에만
+# 찍힌다 — 홀드아웃 채점 시 "정답 조항이 몇 위로 검색됐는지"를 사람이 직접 눈으로
+# 대조하기 위한 용도. 기본값 false.
+RANK_DEBUG = os.getenv("RANK_DEBUG", "false").strip().lower() in ("1", "true", "yes")
+
+
+def _print_rank_debug(item_seq: str, field: str, query: str, results: list[dict]) -> None:
+    import sys
+    print(f'\n[RANK_DEBUG] item_seq={item_seq} field={field} query="{query}"', file=sys.stderr)
+    if not results:
+        print("  (검색 결과 없음)", file=sys.stderr)
+        return
+    for i, r in enumerate(results, 1):
+        print(f"  {i}위 (score={r['score']:.4f}) {r['text']}", file=sys.stderr)
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _NBSP_RE = re.compile(r"&nbsp;")
 _WS_RE = re.compile(r"\s+")
@@ -303,4 +324,7 @@ def search_paragraphs(item_seq: str, field: str, query: str, top_k: int = 8):
     ]
     pool.sort(key=lambda r: -r["score"])
 
-    return _rerank(query, pool, top_k)
+    final = pool[:top_k] if not RERANK_ENABLED else _rerank(query, pool, top_k)
+    if RANK_DEBUG:
+        _print_rank_debug(item_seq, field, query, final)
+    return final
