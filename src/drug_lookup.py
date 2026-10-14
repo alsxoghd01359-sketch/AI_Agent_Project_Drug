@@ -36,6 +36,7 @@ _list_by_seq = None
 _ingredients_by_seq = None  # item_seq -> [MTRAL_NM, ...]
 _taboo_pairs = None  # {(성분A, 성분B) 정렬됨: PROHBT_CONTENT}
 _taboo_ingredients = None  # {병용금기 쌍에 한 번이라도 등장하는 성분명}
+_taboo_pairs_by_seq = None  # {(item_seq A, item_seq B) 정렬됨: PROHBT_CONTENT}
 _dur_cautions_by_seq = None  # item_seq -> [{"type":, "content":}, ...] (단일 품목 기준 DUR 주의사항)
 _effect_groups_by_seq = None  # item_seq -> {효능군 이름, ...} (효능군중복 체크용)
 
@@ -105,26 +106,48 @@ def _load_taboo_pairs():
     """dur_usjnt_taboo.jsonl은 79만 줄(1.3GB)이지만 실제 고유 병용금기 쌍은
     870개뿐이다(중복 성분쌍이 대부분). 매번 1.3GB를 다 읽는 대신, 뽑아낸 결과를
     캐시 파일에 저장해두고 다음 실행부터는 그걸 바로 불러온다.
+
+    성분 이름 쌍(_taboo_pairs)뿐 아니라 item_seq 쌍(_taboo_pairs_by_seq)도 같은
+    파일에서 같이 뽑아둔다. 성분 이름 경로는 item_seq가 drug_prdt_mcpn_detail.jsonl에
+    없으면(실측: 전체 8,206개 병용금기 관련 품목 중 126개, 약 1.5%가 이 파일에
+    없음 — 자나팜정0.25밀리그램, 트리람정0.25밀리그램 등) 성분 자체를 못 가져와서
+    매칭이 통째로 무산된다. dur_usjnt_taboo.jsonl 레코드 자체에 ITEM_SEQ/
+    MIXTURE_ITEM_SEQ가 이미 들어있으므로, item_seq로 직접 비교하면 그 공백과
+    무관하게 매칭된다. 캐시 파일명을 바꿔서(taboo_pairs.pkl -> taboo_pairs_v2.pkl)
+    예전 캐시(성분 쌍만 있던 버전)가 섞여 쓰이지 않게 한다.
     """
-    global _taboo_pairs, _taboo_ingredients
-    cache_path = _CACHE_DIR / "taboo_pairs.pkl"
+    global _taboo_pairs, _taboo_ingredients, _taboo_pairs_by_seq
+    cache_path = _CACHE_DIR / "taboo_pairs_v2.pkl"
     if cache_path.exists():
         with cache_path.open("rb") as f:
-            _taboo_pairs = pickle.load(f)
+            _taboo_pairs, _taboo_pairs_by_seq = pickle.load(f)
         _taboo_ingredients = {ingr for pair in _taboo_pairs for ingr in pair}
         return
 
     pairs = {}
+    pairs_by_seq = {}
     for r in _read_jsonl("dur_usjnt_taboo"):
         a, b = r.get("INGR_KOR_NAME"), r.get("MIXTURE_INGR_KOR_NAME")
         if a and b:
             pairs[tuple(sorted([a, b]))] = r.get("PROHBT_CONTENT")
+        seq_a, seq_b = r.get("ITEM_SEQ"), r.get("MIXTURE_ITEM_SEQ")
+        if seq_a and seq_b:
+            # 성분 이름도 같이 저장해둔다 — item_seq 경로는 애초에
+            # drug_prdt_mcpn_detail.jsonl에 없는 제품을 구제하려는 거라,
+            # 그쪽 성분 이름을 못 가져오는 게 당연하다. 레코드 자체에 있는
+            # 성분 이름(INGR_KOR_NAME/MIXTURE_INGR_KOR_NAME)을 같이 챙겨두면
+            # 표시할 때 "등록은 됐는데 성분 이름을 모른다"는 어색함이 없다.
+            pairs_by_seq[tuple(sorted([seq_a, seq_b]))] = {
+                seq_a: a, seq_b: b, "reason": r.get("PROHBT_CONTENT"),
+            }
 
     _taboo_pairs = pairs
     _taboo_ingredients = {ingr for pair in pairs for ingr in pair}
+    _taboo_pairs_by_seq = pairs_by_seq
+
     _CACHE_DIR.mkdir(exist_ok=True)
     with cache_path.open("wb") as f:
-        pickle.dump(pairs, f)
+        pickle.dump((_taboo_pairs, _taboo_pairs_by_seq), f)
 
 
 def _load_dur_item_cautions():
@@ -546,23 +569,43 @@ def check_multiple_drugs(names: list[str]):
         if len(drugs) >= 2
     ]
 
-    # 2) DUR 병용금기 — 모든 쌍 조합
+    # 2) DUR 병용금기 — 모든 쌍 조합. 성분 이름 매칭을 우선 쓰고, 그걸로 못 찾은
+    # 쌍만 item_seq로 직접 한 번 더 확인한다(drug_prdt_mcpn_detail.jsonl에 없는
+    # 품목 126개 구제용). 같은 두 약을 두 경로 모두에서 또 보고하지 않도록
+    # seen_drug_pairs(약 쌍 자체 기준)로 막는다.
     seen_pairs = set()
+    seen_drug_pairs = set()
     taboo_hits = []
     for i in range(len(resolved)):
         for j in range(i + 1, len(resolved)):
             a, b = resolved[i], resolved[j]
+            if not a["item_seq"] or not b["item_seq"]:
+                continue
+            drug_pair_key = tuple(sorted([a["item_seq"], b["item_seq"]]))
+            found = False
             for ia in a["ingredients"]:
                 for ib in b["ingredients"]:
                     key = tuple(sorted([ia, ib]))
                     reason = _taboo_pairs.get(key)
                     if reason and key not in seen_pairs:
                         seen_pairs.add(key)
+                        seen_drug_pairs.add(drug_pair_key)
+                        found = True
                         taboo_hits.append({
                             "drug_a": a["item_name"], "ingredient_a": ia,
                             "drug_b": b["item_name"], "ingredient_b": ib,
                             "reason": reason,
                         })
+            if found or drug_pair_key in seen_drug_pairs:
+                continue
+            seq_hit = _taboo_pairs_by_seq.get(drug_pair_key)
+            if seq_hit:
+                seen_drug_pairs.add(drug_pair_key)
+                taboo_hits.append({
+                    "drug_a": a["item_name"], "ingredient_a": seq_hit.get(a["item_seq"]) or "",
+                    "drug_b": b["item_name"], "ingredient_b": seq_hit.get(b["item_seq"]) or "",
+                    "reason": seq_hit["reason"],
+                })
 
     # 3) 효능군중복 — 성분은 달라도 같은 효능군(예: 해열.진통.소염제)이면
     #    효과가 겹쳐서 과다복용과 비슷한 위험이 생길 수 있다. 모든 쌍 조합 확인.
