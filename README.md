@@ -35,43 +35,6 @@ data.go.kr(공공데이터포털)의 식약처 공개 API 13개를 전부 수집
 | `dur_pwnm_taboo` | DUR 임부금기 |
 | `easy_drug` | e약은요(쉬운 설명) |
 
-## 설치 및 실행
-
-```bash
-pip install -r requirements.txt
-```
-
-`.env` 파일 생성:
-
-```env
-DATA_GO_KR_SERVICE_KEY=   # data.go.kr 일반 인증키(Decoding)
-OPENAI_API_KEY=           # OpenAI API 키 (챗봇 응답 + 임베딩용)
-
-# 선택 (기본값으로도 동작함)
-RERANK_ENABLED=true           # 생활질문 2단계 LLM 재랭킹 on/off
-RELEVANCE_CHECK_ENABLED=true  # 선별된 문단의 조건 관련도 재확인 on/off
-RANK_DEBUG=false              # 검색 순위를 터미널에 출력(홀드아웃 채점용)
-SCORE_DEBUG=false             # 채점 진단 정보를 답변에 덧붙임
-```
-
-데이터 수집(최초 1회, 중간에 끊겨도 이어서 진행됨):
-
-```bash
-python src/fetch_drug_data.py
-```
-
-실행:
-
-```bash
-# Streamlit 채팅 UI
-run_streamlit.bat
-# 또는
-streamlit run src/streamlit_app.py
-
-# 터미널 CLI
-python src/chat_cli.py
-```
-
 ## 프로젝트 구조
 
 ```
