@@ -163,6 +163,14 @@ def _load_dur_item_cautions():
     파일 쪽이 더 상세해서 중복 안 시킨다. (처음엔 임부금기도 dur_prdlst 플래그로만
     가져왔는데, 내용 없는 플래그뿐이었음. dur_pwnm_taboo라는 전용 파일이 따로 있고
     내용까지 93% 채워져 있다는 걸 뒤늦게 발견해서 그쪽으로 교체함.)
+
+    첨가제주의는 dur_prdlst.jsonl 자체에 사유 필드가 없다(TYPE_CODE만 있음). 다만
+    실측 확인(표본 2,000개 중 86.5%)으로, 그 제품의 사용상주의사항 원문(NB_DOC_DATA,
+    drug_prdt_prmsn_detail.jsonl)에 "이 약은 유당을 함유하고 있으므로..." 같은
+    구체적 문구가 이미 들어있는 경우가 대부분임을 확인했다. 그래서 플래그만 쓰지
+    않고 _find_excipient_caution으로 NB 원문에서 첨가제 관련 문장을 찾아 붙인다.
+    (나머지 13.5%는 오래된 허가 제품이라 라벨이 안 갱신된 경우로 보이며, 이 경우는
+    이전처럼 None으로 두고 호출부가 "구체적인 문구는 없습니다"로 대체한다.)
     """
     global _dur_cautions_by_seq
     cautions: dict[str, list] = {}
@@ -182,11 +190,33 @@ def _load_dur_item_cautions():
         type_flags = (r.get("TYPE_NAME  ") or "")
         if not seq or not type_flags:
             continue
-        for flag in ("첨가제주의",):
-            if flag in type_flags:
-                cautions.setdefault(seq, []).append({"type": flag, "content": None})
+        if "첨가제주의" in type_flags:
+            # 사유는 여기서 바로 안 채운다 — 1만 3천여개 전부를 미리 NB_DOC_DATA까지
+            # 열어 찾으면 시작할 때만 70초 넘게 걸린다(실측). get_product_detail이
+            # 어차피 조회된 품목 하나의 NB_DOC_DATA를 이미 메모리에 들고 있으므로,
+            # 거기서 그 하나만 _find_excipient_caution으로 지연 계산한다.
+            cautions.setdefault(seq, []).append({"type": "첨가제주의", "content": None})
 
     _dur_cautions_by_seq = cautions
+
+
+_EXCIPIENT_KEYWORDS = (
+    "유당", "타르색소", "파라벤", "벤질알코올", "아스파탐",
+    "이산화황", "글루텐", "대두", "땅콩",
+)
+
+
+def _find_excipient_caution(nb_doc_data: str | None) -> str | None:
+    """첨가제주의 품목의 사유를, 이미 메모리에 있는 사용상주의사항 원문(NB_DOC_DATA)
+    에서 찾는다. 못 찾으면 None — 호출부가 "등록되어 있으나 구체적인 문구는
+    없습니다"로 대체하므로, 억지로 아무 문장이나 반환하지 않는다."""
+    if not nb_doc_data:
+        return None
+    hits = [
+        line for line in doc_xml_to_text(nb_doc_data).split("\n")
+        if any(k in line for k in _EXCIPIENT_KEYWORDS)
+    ]
+    return " ".join(hits) if hits else None
 
 
 def _load_effect_groups():
@@ -504,6 +534,12 @@ def get_product_detail(item_seq: str, live_status: bool = False):
         if live is not None:
             cancel_name, cancel_date = live
 
+    dur_cautions = _dur_cautions_by_seq.get(item_seq, [])
+    for d in dur_cautions:
+        if d["type"] == "첨가제주의" and d["content"] is None:
+            # detail(NB_DOC_DATA)이 이미 메모리에 있는 김에 지금 이 품목 하나만 찾는다.
+            d["content"] = _find_excipient_caution(detail.get("NB_DOC_DATA"))
+
     return {
         "item_seq": item_seq,
         "item_name": base.get("ITEM_NAME"),
@@ -518,7 +554,7 @@ def get_product_detail(item_seq: str, live_status: bool = False):
         "상호작용": easy.get("intrcQesitm"),
         "이상반응": easy.get("seQesitm"),
         "has_interaction_data": has_interaction_data,
-        "dur_cautions": _dur_cautions_by_seq.get(item_seq, []),
+        "dur_cautions": dur_cautions,
     }
 
 

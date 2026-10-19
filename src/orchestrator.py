@@ -682,11 +682,23 @@ def _build_drug_info_answer(item_seq, detail, question, data_source):
     # 같이 보여주면 묻지 않은 걸 끼워 넣는 셈이다(실측: "임산부인데 먹어도 되나요?"에
     # 성분·효능효과·용법용량·전체 경고까지 다 나와서 "임부금기" 외의 내용이 끼어들었다).
     dtype = _dur_type_for_question(question)
+    if detail.get("cancel_name") and detail["cancel_name"] != "정상" and scope == "sale_status":
+        # "판매되나요"처럼 판매 상태만 물었는데 정상이 아니면, facts가 이 한 줄뿐이라
+        # 요약 문장과 [조회된 사실]이 똑같은 내용을 두 번 보여주는 셈이다. 그 경우는
+        # 조회된 사실 없이 요약 문장 하나로만 답한다.
+        summary = (
+            f"{detail.get('item_name')}은 {_format_date(detail.get('cancel_date'))}자로 "
+            f"{detail['cancel_name']} 처리되어 더 이상 정상적으로 판매되지 않습니다. "
+            "복용 중이라면 약사나 의사와 상담하세요."
+        )
+        closing = _PRESCRIPTION_NOTE if detail.get("spclty_pblc") == "전문의약품" else None
+        footer = (closing + "\n\n" if closing else "") + _data_source_line(data_source, detail.get("item_name"))
+        return summary, footer
     basic = []
     if detail.get("cancel_name") and detail["cancel_name"] != "정상":
         # 판매 중지 여부는 뭘 물었든 항상 먼저 알린다(안전과 직결).
         basic.append(
-            f"- (판매 상태) 이 제품은 {detail.get('cancel_date')}자로 {detail['cancel_name']} 처리되어 "
+            f"- (판매 상태) 이 제품은 {_format_date(detail.get('cancel_date'))}자로 {detail['cancel_name']} 처리되어 "
             "더 이상 정상적으로 판매되지 않습니다. 복용 중이라면 약사나 의사와 상담하세요."
         )
     elif scope == "sale_status":
@@ -1206,6 +1218,18 @@ _ANSWER_NOTE = (
     "answer 필드를 글자 하나, 줄바꿈이나 라벨 하나도 바꾸지 말고 그대로 출력하세요. "
     "요약하거나, 라벨을 **굵게**로 바꾸거나, 설명을 더 붙이거나 빼지 마세요. 이게 전체 답변입니다."
 )
+
+
+def _format_date(yyyymmdd):
+    """식약처 API의 "YYYYMMDD" 날짜 문자열을 "YYYY년 M월 D일"로 바꾼다.
+    형식이 다르거나 없으면 원본 문자열을 그대로 돌려준다(값이 깨졌다고 숨기지 않음)."""
+    if not yyyymmdd or len(yyyymmdd) != 8 or not yyyymmdd.isdigit():
+        return yyyymmdd
+    try:
+        d = datetime.strptime(yyyymmdd, "%Y%m%d")
+    except ValueError:
+        return yyyymmdd
+    return f"{d.year}년 {d.month}월 {d.day}일"
 
 
 def _file_date(path):

@@ -21,10 +21,32 @@ _RING_START = "#2F8FFF"
 _RING_END = "#30E3B3"
 _TEXT = "#EAF6F3"
 
+# 이모지 대신 로딩 화면과 같은 스타일(알약/사람 실루엣)로 직접 그린 SVG를 쓴다.
+# src/assets/에 있고, 앱은 프로젝트 루트에서 실행되므로 이 상대경로로 찾는다.
+_USER_AVATAR = "src/assets/user_avatar.svg"
+_ASSISTANT_AVATAR = "src/assets/pill_avatar.svg"
+
 _SHARED_CSS = f"""
 <style>
 .stApp {{
     background: radial-gradient(circle at 50% 35%, {_BG_RADIAL} 0%, {_BG_DARK} 70%);
+}}
+/* 채팅 말풍선: AI 쪽은 배경 없이(원래 Streamlit 느낌 그대로), 사용자 쪽만
+   은은한 포인트색 배경으로 구분한다. 아바타 testid(stChatMessageAvatarUser 등)는
+   커스텀 이미지 아바타를 쓰면 안 붙는다는 걸 실측으로 확인했다(기본 이모지
+   아바타 전용) — 대신 내용 쪽에 항상 붙는 aria-label(예: "Chat message from
+   user")로 부모(stChatMessage)를 고른다. 이것도 Streamlit 내부 DOM이라 버전이
+   바뀌면 깨질 수 있지만, 셀렉터가 안 맞아도 이 블록만 무시되고 기본 모양으로
+   보일 뿐이다. */
+[data-testid="stChatMessage"] {{
+    border-radius: 16px;
+    padding: 4px 6px;
+    margin-bottom: 4px;
+}}
+[data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) {{
+    background: #13293f;
+    border: 1px solid {_RING_START}55;
+    border-right: 3px solid {_RING_START};
 }}
 </style>
 """
@@ -74,18 +96,18 @@ def _loading_html(phase: str) -> str:
     """로딩 화면 한 단계를 그린다.
 
     phase="fill": 실제 로딩이 정확히 몇 초 걸릴지는 알 수 없으니, 약 20초에 걸쳐
-    90%까지만 서서히(ease-out) 채우고 거기서 멈춘다 — 100%까지 미리 채워버리면
-    "다 끝났다"는 거짓 신호가 되기 때문에 90%를 상한으로 둔다.
-    phase="done": 실제로 전부 끝난 시점에 90% -> 100%를 짧게(0.5초) 채워서
+    95%까지만 서서히(ease-out) 채우고 거기서 멈춘다 — 100%까지 미리 채워버리면
+    "다 끝났다"는 거짓 신호가 되기 때문에 95%를 상한으로 둔다.
+    phase="done": 실제로 전부 끝난 시점에 95% -> 100%를 짧게(0.5초) 채워서
     "방금 끝났다"는 걸 보여준 뒤 채팅 화면으로 넘어간다.
     """
     if phase == "fill":
         start_offset = _RING_CIRC
-        end_offset = _RING_CIRC * 0.10  # 90% 채움
+        end_offset = _RING_CIRC * 0.05  # 95% 채움
         duration = "20s"
         timing = "cubic-bezier(0.15, 0.6, 0.25, 1)"  # 갈수록 느려짐(ease-out), 자연스러운 감속
     else:
-        start_offset = _RING_CIRC * 0.10
+        start_offset = _RING_CIRC * 0.05
         end_offset = 0  # 100% 채움
         duration = "0.7s"
         # easeOutExpo류 곡선: 처음엔 휙 빠르게 움직이다 끝에서 부드럽게 멎는다.
@@ -172,7 +194,7 @@ if not st.session_state.app_ready:
     _load_name_index()
 
     placeholder.markdown(_loading_html("done"), unsafe_allow_html=True)
-    time.sleep(0.6)  # 100% 채워진 모습을 짧게라도 보여준 뒤 채팅 화면으로 넘어간다
+    time.sleep(0.5)  # 100% 채워진 모습을 짧게라도 보여준 뒤 채팅 화면으로 넘어간다
 
     st.session_state.app_ready = True
     st.rerun()
@@ -195,7 +217,8 @@ if "history" not in st.session_state:
 user_input = st.chat_input("약에 대해 궁금한 점을 물어보세요")
 
 for msg in st.session_state.history:
-    with st.chat_message(msg["role"]):
+    avatar = _USER_AVATAR if msg["role"] == "user" else _ASSISTANT_AVATAR
+    with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(_md_safe(msg["text"]))
         if msg.get("footer"):
             # 전문의약품 안내·병용금기 등록 안내·데이터 출처처럼 그 답변에만 해당하는
@@ -204,10 +227,10 @@ for msg in st.session_state.history:
 
 if user_input:
     st.session_state.history.append({"role": "user", "text": user_input, "footer": None})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=_USER_AVATAR):
         st.markdown(_md_safe(user_input))
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=_ASSISTANT_AVATAR):
         with st.spinner("데이터를 조회하는 중입니다..."):
             reply = st.session_state.conversation.send(user_input)
         st.markdown(_md_safe(reply["text"]))
